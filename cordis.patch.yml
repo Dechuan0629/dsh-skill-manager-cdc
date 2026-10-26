@@ -1,0 +1,8 @@
+# DSH custom skill manager bundle patch.
+#
+# One Host row is enough: the Client bundle owns the whole UI (sidebar panel,
+# session menu entry, dialogs and the /mySkills command). The plugin never
+# edits the installed profile; plugin_manager installs this row.
+- insert:
+    - id: skill-manager
+      name: 'dsh-skill-manager'
