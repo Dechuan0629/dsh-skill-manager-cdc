@@ -13,7 +13,11 @@
 ## 安装
 
 ```bash
+# 本地目录
 dsh plugin --profile <profile> add /absolute/path/to/dsh-skill-manager
+
+# 或直接从 GitHub 安装
+dsh plugin --profile <profile> add git+https://github.com/Dechuan0629/dsh-skill-manager-cdc.git
 ```
 
 或在 DSH Web UI 的插件市场 / `plugin_manager` 里安装本地目录。安装后插件会在 profile 的 `cordis.patch.yml` 中插入一行：
