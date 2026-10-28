@@ -34,6 +34,10 @@ window.__ModuleLoader__.load({
     const PANEL_ID = 'skill-manager';
     const STYLE_ID = 'dsh-skill-manager-styles';
     const EMPTY_DRAFT = { displayName: '', slug: '', description: '', whenToUse: '', body: '' };
+    const SCRIPT_ACCEPT = '.py,.js,.mjs,.cjs,.ts,.sh,.bash,.zsh,.rb,.ps1,.bat,.cmd,.pl,.php,.lua';
+    const SCRIPT_EXTENSIONS = SCRIPT_ACCEPT.split(',');
+    const SCRIPT_MAX_BYTES = 128 * 1024;
+    const SCRIPT_IMPORT_LIMIT = 20;
 
     // ---------------------------------------------------------------- styles
 
@@ -92,6 +96,10 @@ window.__ModuleLoader__.load({
 .smx-pre{margin:0;padding:10px 12px;border-radius:9px;background:var(--dsw-alias-bg-layer-1,#f6f7f9);font-family:var(--dsh-font-family-code,ui-monospace,SFMono-Regular,Menlo,monospace);font-size:12px;line-height:1.55;white-space:pre-wrap;word-break:break-word;max-height:320px;overflow:auto;}
 .smx-scripts{display:flex;flex-direction:column;gap:3px;font-size:12px;}
 .smx-script{display:flex;gap:10px;justify-content:space-between;color:var(--dsw-alias-label-secondary,#555);}
+.smx-script-row{display:flex;align-items:center;gap:8px;justify-content:space-between;padding:6px 8px;border-radius:8px;background:var(--dsw-alias-bg-layer-1,#f7f7f7);}
+.smx-script-row .smx-script{flex:1;min-width:0;font-family:var(--dsh-font-family-code,ui-monospace);}
+.smx-check{display:flex;align-items:flex-start;gap:8px;font-size:13px;line-height:1.5;cursor:pointer;}
+.smx-check input{margin-top:3px;}
 .smx-empty{display:flex;flex-direction:column;align-items:center;gap:8px;padding:44px 16px;color:var(--dsw-alias-label-tertiary,#8a8a8a);font-size:13px;text-align:center;line-height:1.6;}
 .smx-toast{padding:6px 12px;border-radius:999px;background:rgba(17,24,39,.88);color:#fff;font-size:12px;align-self:center;margin:6px 0 10px;}
 .smx-mask{position:fixed;inset:0;z-index:1200;display:flex;align-items:center;justify-content:center;padding:24px;background:rgba(0,0,0,.42);pointer-events:auto;}
@@ -391,7 +399,10 @@ window.__ModuleLoader__.load({
       const [view, setView] = useState('list');
       const [mode, setMode] = useState('ai');
       const [aiPrompt, setAiPrompt] = useState('');
+      const [withScripts, setWithScripts] = useState(true);
       const [draft, setDraft] = useState(EMPTY_DRAFT);
+      const [scripts, setScripts] = useState([]);
+      const [draftWarnings, setDraftWarnings] = useState([]);
       const [generating, setGenerating] = useState(false);
       const [creating, setCreating] = useState(false);
       const [formError, setFormError] = useState('');
@@ -420,7 +431,10 @@ window.__ModuleLoader__.load({
       const resetCreate = useCallback(() => {
         setMode('ai');
         setAiPrompt('');
+        setWithScripts(true);
         setDraft(EMPTY_DRAFT);
+        setScripts([]);
+        setDraftWarnings([]);
         setFormError('');
       }, []);
 
@@ -433,6 +447,46 @@ window.__ModuleLoader__.load({
         setDraft((current) => ({ ...current, ...patch }));
       }
 
+      function scriptExtensionOf(name) {
+        const index = String(name || '').lastIndexOf('.');
+        return index < 0 ? '' : String(name).slice(index).toLowerCase();
+      }
+
+      async function importScriptFiles(files) {
+        const list = Array.from(files || []);
+        if (!list.length) return;
+        const next = [...scripts];
+        const rejected = [];
+        for (const file of list) {
+          const name = file.name || 'script';
+          if (!SCRIPT_EXTENSIONS.includes(scriptExtensionOf(name))) {
+            rejected.push(`${name}（不支持的脚本类型）`);
+            continue;
+          }
+          if (file.size > SCRIPT_MAX_BYTES) {
+            rejected.push(`${name}（超过 ${formatBytes(SCRIPT_MAX_BYTES)}）`);
+            continue;
+          }
+          if (next.some((script) => script.name.toLowerCase() === name.toLowerCase())) {
+            rejected.push(`${name}（同名脚本已存在）`);
+            continue;
+          }
+          if (next.length >= SCRIPT_IMPORT_LIMIT) {
+            rejected.push(`${name}（一次最多 ${SCRIPT_IMPORT_LIMIT} 个脚本）`);
+            continue;
+          }
+          const content = await file.text();
+          next.push({ name, content, bytes: content.length });
+        }
+        setScripts(next);
+        if (rejected.length) setFormError(`已忽略：${rejected.join('、')}`);
+        else setFormError('');
+      }
+
+      function removeScript(name) {
+        setScripts((current) => current.filter((script) => script.name !== name));
+      }
+
       async function runGenerate() {
         const prompt = aiPrompt.trim();
         if (!prompt) {
@@ -442,7 +496,7 @@ window.__ModuleLoader__.load({
         setFormError('');
         setGenerating(true);
         try {
-          const result = await apiPost('/action', { action: 'generate', prompt });
+          const result = await apiPost('/action', { action: 'generate', prompt, withScripts });
           const next = result.draft || {};
           setDraft({
             displayName: next.displayName || '',
@@ -451,8 +505,14 @@ window.__ModuleLoader__.load({
             whenToUse: next.whenToUse || '',
             body: next.body || '',
           });
+          setScripts(Array.isArray(next.scripts) ? next.scripts : []);
+          setDraftWarnings(Array.isArray(next.warnings) ? next.warnings : []);
           setMode('manual');
-          setToast('AI 草稿已生成，确认或修改后点击创建');
+          setToast(
+            Array.isArray(next.scripts) && next.scripts.length
+              ? `AI 草稿已生成，含 ${next.scripts.length} 个 scripts 脚本`
+              : 'AI 草稿已生成，确认或修改后点击创建',
+          );
         } catch (error) {
           setFormError(messageOf(error));
         } finally {
@@ -476,6 +536,7 @@ window.__ModuleLoader__.load({
             description: draft.description.trim() || undefined,
             whenToUse: draft.whenToUse.trim() || undefined,
             body: draft.body,
+            scripts: scripts.map((script) => ({ name: script.name, content: script.content })),
             prompt: mode === 'ai' ? aiPrompt.trim() || undefined : undefined,
           });
           await refreshState().catch(() => {});
@@ -657,11 +718,53 @@ window.__ModuleLoader__.load({
                 placeholder: '例如：把 Markdown 表格转换成 Excel，并建议列宽',
                 onChange: (event) => setAiPrompt(event.target.value),
               }),
+              h('label', { className: 'smx-check' },
+                h('input', { type: 'checkbox', checked: withScripts, onChange: (event) => setWithScripts(event.target.checked) }),
+                h('span', null,
+                  '同时生成配套 scripts 脚本（跨平台）',
+                  h('span', { className: 'smx-hint', style: { display: 'block' } },
+                    '勾选后 AI 会按任务生成 .py / .js / .sh / .ps1 / .bat 等可直接运行的脚本；提供 .sh 时会尽量配套 Windows 脚本，并在提示词里写明按 agent 环境选择。'))),
               h('div', { className: 'smx-actions' },
-                h('button', { type: 'button', className: 'smx-btn smx-btn-primary', disabled: generating || !modelAvailable, onClick: () => void runGenerate() }, generating ? '生成中…' : 'AI 生成草稿'),
+                h('button', { type: 'button', className: 'smx-btn smx-btn-primary', disabled: generating || !modelAvailable, onClick: () => void runGenerate() }, generating ? '生成中…' : withScripts ? 'AI 生成草稿与脚本' : 'AI 生成草稿'),
                 !modelAvailable ? h('span', { className: 'smx-hint' }, `默认模型不可用：${modelReason || '未配置'}`) : null),
             )
           : null;
+
+        const scriptsBlock = h('div', { key: 'scripts', className: 'smx-field' },
+          h('span', { className: 'smx-label' }, `scripts/ 脚本（${scripts.length}）`),
+          scripts.length
+            ? h('div', { className: 'smx-scripts' },
+                scripts.map((script) =>
+                  h('div', { key: script.name, className: 'smx-script-row' },
+                    h('div', { className: 'smx-script' },
+                      h('span', null, `scripts/${script.name}`),
+                      h('span', null, formatBytes(script.bytes || 0))),
+                    h('button', {
+                      type: 'button',
+                      className: 'smx-btn smx-btn-sm',
+                      onClick: () => removeScript(script.name),
+                    }, '移除'))))
+            : h('span', { className: 'smx-hint' }, '还没有脚本。AI 勾选生成，或从本机导入 .py / .js / .ts / .sh / .rb / .ps1 / .bat 等脚本。'),
+          h('div', { className: 'smx-actions' },
+            h('label', { className: 'smx-btn smx-btn-sm', style: { cursor: 'pointer' } },
+              '导入脚本文件',
+              h('input', {
+                type: 'file',
+                multiple: true,
+                accept: SCRIPT_ACCEPT,
+                style: { display: 'none' },
+                onChange: (event) => {
+                  const files = event.target.files;
+                  event.target.value = '';
+                  void importScriptFiles(files);
+                },
+              })),
+            h('span', { className: 'smx-hint' }, '支持多选；导入后写入 scripts/ 目录，SKILL.md 中可按运行环境选择对应脚本。')),
+          draftWarnings.length
+            ? h('div', { className: 'smx-banner smx-banner-warn' },
+                h('ul', { style: { margin: 0, paddingLeft: '18px' } }, draftWarnings.map((warning, index) => h('li', { key: index }, warning))))
+            : null,
+        );
 
         const fields = mode === 'manual'
           ? [
@@ -681,6 +784,7 @@ window.__ModuleLoader__.load({
                 h('span', { className: 'smx-label' }, 'SKILL.md 提示词正文'),
                 h('textarea', { className: 'smx-textarea smx-textarea-code', value: draft.body, placeholder: '写清步骤、约束与可调用的 scripts/ 脚本用法…', onChange: (event) => patchDraft({ body: event.target.value }) }),
                 h('span', { className: 'smx-hint' }, '保存时会自动写入 name / description / displayName frontmatter；正文中也可以自带 frontmatter。')),
+              scriptsBlock,
             ]
           : null;
 

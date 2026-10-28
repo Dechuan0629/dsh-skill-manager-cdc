@@ -1,6 +1,6 @@
 {
   "name": "dsh-skill-manager",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": false,
   "description": "DSH 自定义 SKILL 管理：压缩包导入、AI/手动创建、会话挂载与 /mySkills 本轮选择。",
   "license": "MIT",

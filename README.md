@@ -66,7 +66,8 @@ disable-model-invocation: true
 面板里的「新建」支持两种方式：
 
 1. **AI 生成**：输入一句话需求，调用 DSH 默认模型生成 `displayName` / `description` / `body` 草稿，可编辑后创建。
-2. **手动编写**：直接填写提示词正文。
+   - 勾选「同时生成配套 scripts 脚本（跨平台）」后，模型会按任务生成可直接运行的 `.py` / `.js` / `.ts` / `.sh` / `.rb` / `.ps1` / `.bat` 等脚本（**默认勾选**）。提供 `.sh` 时会同时给出 Windows 的 `.ps1` 或 `.bat`，并在正文里注明「根据 agent 环境选择 scripts/ 下对应脚本」。
+2. **手动编写**：直接填写提示词正文；可用「导入脚本」一次选择多个 `.py` / `.sh` / `.ps1` 等文件，保存时写入 `scripts/` 目录，也可逐个移除。
 
 名称留空时，插件会调用一次 DSH 默认模型，阅读 `SKILL.md` 的定义并生成 3–6 个汉字的显示名；手动填写则直接使用（1–30 字）。模型不可用时自动降级为本地生成的名字，不会阻塞导入。
 
@@ -108,6 +109,9 @@ scripts/run.sh
 | POST | `/dsh-skill-manager/import` | 原始压缩包字节；`x-skill-manager-filename` 头携带文件名 |
 | POST | `/dsh-skill-manager/action` | `generate` / `generate-name` / `create` / `create-imported` / `discard-import` / `delete` / `content` / `mounts` |
 
+- `generate` 接收 `{ prompt, withScripts? }`：`withScripts: true` 时草稿额外返回 `scripts: [{ name, content, bytes }]` 与 `warnings`（例如只有 `.sh` 时的 Windows 脚本缺失提示）。
+- `create` 接收 `{ displayName?, slug?, description?, whenToUse?, body, scripts?, sessionId? }`：`scripts` 每项为 `{ name, content }`，文件名必须在 `scripts/` 下且扩展名在白名单内；创建时写入 `scripts/`，并在正文末尾补一段「脚本与环境」说明（已包含 `scripts/` 文字时不会重复追加）。
+
 错误统一为 `{ "ok": false, "error": { "code": "...", "message": "..." } }`，状态码见 `lib/errors.js`。
 
 ## 限制
@@ -119,6 +123,8 @@ scripts/run.sh
 | 解压文件数 | 500 |
 | 单文件 | 10 MB |
 | `SKILL.md` | 2 MB |
+| 单个 scripts 脚本 | 128 KB |
+| 单个 Skill 的 scripts 数量 | 20 |
 | 单会话挂载数 | 100 |
 | 暂存份数 / 有效期 | 5 / 30 分钟 |
 
@@ -140,6 +146,7 @@ dsh-skill-manager/
 │   ├── manifest.js          # SKILL.md frontmatter 解析与序列化
 │   ├── naming.js            # 显示名 / slug 规则、AI 结果归一化
 │   ├── paths.js             # ~/.dsh 布局、slug 与路径安全
+│   ├── scripts.js           # scripts 脚本白名单 / 归一化 / 跨平台配对提示
 │   ├── staging.js           # 导入暂存（TTL / 数量上限）
 │   └── store.js             # 会话挂载状态持久化
 └── test/                    # node --test（unit / archive / llm / host）

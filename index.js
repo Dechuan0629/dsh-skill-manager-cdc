@@ -23,6 +23,7 @@ import { resolveLayout, writeFileAtomic } from './lib/paths.js';
 import { STAGING_TTL_MS, MAX_STAGING, StagingStore } from './lib/staging.js';
 import { MountStore } from './lib/store.js';
 import { parseSkillMarkdown } from './lib/manifest.js';
+import { normalizeScriptList, withEnvironmentNote } from './lib/scripts.js';
 
 const SESSION_ID_RE = /^[A-Za-z0-9._:-]{1,200}$/;
 const JSON_BODY_LIMIT = 1024 * 1024;
@@ -152,7 +153,8 @@ export function createService(ctx, { layout = resolveLayout() } = {}) {
   }
 
   async function actionGenerate(payload) {
-    const draft = await generateDraft(ctx, { prompt: payload.prompt });
+    const withScripts = payload.withScripts === true;
+    const draft = await generateDraft(ctx, { prompt: payload.prompt, withScripts });
     return { draft };
   }
 
@@ -190,6 +192,8 @@ export function createService(ctx, { layout = resolveLayout() } = {}) {
     const parsed = parseSkillMarkdown(bodyInput);
     const description = cleanDisplayName(payload.description ?? '') || parsed.description;
     const whenToUse = cleanDisplayName(payload.whenToUse ?? '') || parsed.whenToUse;
+    const draftBody = parsed.body.trim() ? parsed.body : bodyInput;
+    const prepared = normalizeScriptList(payload.scripts);
     const identity = await resolveIdentity({
       requestedName: payload.displayName,
       frontmatterName: parsed.name,
@@ -203,14 +207,31 @@ export function createService(ctx, { layout = resolveLayout() } = {}) {
       displayName: identity.displayName,
       description: description || defaultDescription(identity.displayName),
       whenToUse,
-      body: parsed.body.trim() ? parsed.body : bodyInput,
+      body: withEnvironmentNote(draftBody, prepared.scripts),
       modelInvocable: false,
     });
+    if (prepared.scripts.length > 0) {
+      try {
+        for (const script of prepared.scripts) {
+          await catalog.writeScript(identity.slug, script.name, script.content);
+        }
+      } catch (error) {
+        await catalog.delete(identity.slug).catch(() => {});
+        throw error;
+      }
+    }
+    const stored = prepared.scripts.length > 0 ? await catalog.read(identity.slug) : skill;
     let mounted;
     if (typeof payload.sessionId === 'string' && payload.sessionId.trim()) {
-      mounted = await mountOne(sessionIdOf(payload.sessionId), skill.slug);
+      mounted = await mountOne(sessionIdOf(payload.sessionId), stored.slug);
     }
-    return { skill, naming: { degraded: identity.degraded, ...(identity.warning ? { warning: identity.warning } : {}) }, ...(mounted ? { mounted } : {}) };
+    return {
+      skill: stored,
+      naming: { degraded: identity.degraded, ...(identity.warning ? { warning: identity.warning } : {}) },
+      scripts: prepared.scripts.map((script) => ({ name: script.name, bytes: script.bytes })),
+      warnings: prepared.warnings,
+      ...(mounted ? { mounted } : {}),
+    };
   }
 
   async function actionCreateImported(payload) {

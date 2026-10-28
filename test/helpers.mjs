@@ -89,8 +89,10 @@ export async function makeZipFixture(root, { wrapper = 'demo-skill', skillFile =
 }
 
 /** A fake context exposing the model services the Host half consumes. */
-export function fakeContext({ selection = { provider: 'deepseek-account', model: 'deepseek-flash' }, reply = '{"displayName":"文档解析"}' } = {}) {
+export function fakeContext({ selection = { provider: 'deepseek-account', model: 'deepseek-flash' }, reply = '{"displayName":"文档解析"}', replies = null } = {}) {
   const warnings = [];
+  const answers = Array.isArray(replies) ? replies : [reply];
+  let answerIndex = 0;
   const ctx = {
     warnings,
     get(name) {
@@ -102,7 +104,9 @@ export function fakeContext({ selection = { provider: 'deepseek-account', model:
           listProviders: () => [{ id: 'deepseek-account', name: 'DeepSeek' }],
           listModels: async () => [{ provider: 'deepseek-account', id: 'deepseek-flash', name: 'Flash' }],
           stream: async function* () {
-            yield { type: 'text-delta', index: 0, text: reply };
+            const text = answers[Math.min(answerIndex, answers.length - 1)];
+            answerIndex += 1;
+            yield { type: 'text-delta', index: 0, text };
             yield { type: 'finish', reason: { kind: 'stop' } };
           },
         };

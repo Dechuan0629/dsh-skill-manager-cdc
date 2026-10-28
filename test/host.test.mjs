@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { readdir, readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import { createService } from '../index.js';
 import { resolveLayout } from '../lib/paths.js';
@@ -189,6 +190,69 @@ test('unknown actions and methods are refused', async () => {
     assert.equal(unknown.status, 400);
     const wrongMethod = await callRoute(service, '/dsh-skill-manager/state', { method: 'POST', body: {} });
     assert.equal(wrongMethod.status, 405);
+  } finally {
+    await cleanup(root);
+  }
+});
+
+test('create writes imported scripts under scripts/ and documents the environment note', async () => {
+  const { root, service, layout } = await setup({ reply: '{"displayName":"表格转换"}' });
+  try {
+    const created = await post(service, {
+      action: 'create',
+      displayName: '表格转换',
+      body: '# 表格转换\n\n把 CSV 转成 Markdown。',
+      scripts: [
+        { name: 'csv2md.py', content: '#!/usr/bin/env python3\nprint("ok")\n' },
+        { name: 'csv2md.ps1', content: 'Write-Output ok\n' },
+      ],
+    });
+    assert.equal(created.status, 200);
+    assert.deepEqual(created.payload.scripts.map((script) => script.name), ['csv2md.py', 'csv2md.ps1']);
+    assert.deepEqual(created.payload.warnings, []);
+    const skillDir = `${layout.skills}/${created.payload.skill.slug}`;
+    const stored = await post(service, { action: 'content', slug: created.payload.skill.slug });
+    assert.deepEqual(stored.payload.skill.scripts.map((script) => script.path).sort(), ['csv2md.ps1', 'csv2md.py']);
+    const markdown = await readFile(`${skillDir}/SKILL.md`, 'utf8');
+    assert.match(markdown, /脚本与环境/);
+  } finally {
+    await cleanup(root);
+  }
+});
+
+test('create rejects a script outside scripts/ and leaves no skill behind', async () => {
+  const { root, service, layout } = await setup();
+  try {
+    const created = await post(service, {
+      action: 'create',
+      displayName: '坏脚本',
+      body: '# 坏脚本\n\n内容。',
+      scripts: [{ name: 'bin/evil.py', content: 'print(1)' }],
+    });
+    assert.equal(created.status, 422);
+    assert.equal(created.payload.ok, false);
+    const remaining = existsSync(layout.skills) ? await readdir(layout.skills) : [];
+    assert.deepEqual(remaining, []);
+  } finally {
+    await cleanup(root);
+  }
+});
+
+test('generate forwards withScripts and reports pairing warnings', async () => {
+  const { root, service } = await setup({
+    replies: [
+      '{"displayName":"表格转换","description":"CSV 转 Markdown","body":"# 表格\\n\\n按环境选择 scripts/ 下脚本。"}',
+      '===FILE: scripts/run.sh===\n#!/bin/sh\necho hi\n===END===\n',
+      '{"displayName":"表格转换","description":"CSV 转 Markdown","body":"# 表格\\n\\n按环境选择 scripts/ 下脚本。"}',
+    ],
+  });
+  try {
+    const generated = await post(service, { action: 'generate', prompt: 'CSV 转 Markdown', withScripts: true });
+    assert.equal(generated.status, 200);
+    assert.deepEqual(generated.payload.draft.scripts.map((script) => script.name), ['run.sh']);
+    assert.ok(generated.payload.draft.warnings.some((warning) => warning.includes('Windows')));
+    const plain = await post(service, { action: 'generate', prompt: 'CSV 转 Markdown' });
+    assert.deepEqual(plain.payload.draft.scripts, []);
   } finally {
     await cleanup(root);
   }

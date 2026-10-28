@@ -139,3 +139,22 @@ test('mount store recovers from a corrupt state file', async () => {
     await cleanup(root);
   }
 });
+
+test('script names are normalized and whitelisted', async () => {
+  const { normalizeScriptList, normalizeScriptName, withEnvironmentNote } = await import('../lib/scripts.js');
+  assert.equal(normalizeScriptName('scripts/run.py'), 'run.py');
+  assert.equal(normalizeScriptName('run.PS1'), 'run.ps1');
+  expectCode(() => normalizeScriptName('../evil.py'), 'invalid_skill');
+  expectCode(() => normalizeScriptName('bin/tool.py'), 'invalid_skill');
+  expectCode(() => normalizeScriptName('payload.exe'), 'invalid_skill');
+  const { scripts, warnings } = normalizeScriptList([
+    { path: 'scripts/run.sh', content: '#!/bin/sh\necho hi\n' },
+    { name: 'run.sh', content: 'duplicate' },
+  ]);
+  assert.deepEqual(scripts.map((script) => script.name), ['run.sh']);
+  assert.ok(warnings.some((warning) => warning.includes('重复')));
+  assert.ok(warnings.some((warning) => warning.includes('Windows')));
+  const body = withEnvironmentNote('# demo\n\n步骤。', scripts);
+  assert.match(body, /脚本与环境/);
+  assert.equal(withEnvironmentNote(body, scripts), body);
+});

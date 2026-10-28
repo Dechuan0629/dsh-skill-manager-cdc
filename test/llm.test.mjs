@@ -52,3 +52,25 @@ test('describeModel reports unavailability without throwing', async () => {
   assert.equal(described.available, false);
   assert.match(described.reason, /模型/);
 });
+
+test('generateDraft adds marker-parsed scripts when withScripts is set', async () => {
+  const draftJson =
+    '{"displayName":"表格转换","description":"CSV 转 Markdown","body":"# 表格\\n\\n按环境选择 scripts/ 下脚本。"}';
+  const scriptText = [
+    '===FILE: scripts/csv2md.py===',
+    '#!/usr/bin/env python3',
+    'print("ok")',
+    '===END===',
+    '',
+    '===FILE: scripts/csv2md.ps1===',
+    'Write-Output ok',
+    '===END===',
+  ].join('\n');
+  const ctx = fakeContext({ replies: [draftJson, scriptText, draftJson] });
+  const withScripts = await generateDraft(ctx, { prompt: '把 CSV 转成 Markdown', withScripts: true });
+  assert.equal(withScripts.displayName, '表格转换');
+  assert.deepEqual(withScripts.scripts.map((script) => script.name), ['csv2md.py', 'csv2md.ps1']);
+  assert.deepEqual(withScripts.warnings, []);
+  const plain = await generateDraft(ctx, { prompt: '把 CSV 转成 Markdown' });
+  assert.deepEqual(plain.scripts, []);
+});
