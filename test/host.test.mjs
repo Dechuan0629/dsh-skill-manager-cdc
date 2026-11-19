@@ -257,3 +257,52 @@ test('generate forwards withScripts and reports pairing warnings', async () => {
     await cleanup(root);
   }
 });
+
+test('mount-info reports the workspace and session labels of every mount', async () => {
+  const services = {
+    workspaceRegistry: {
+      list: () => [
+        { id: 'ws-1', title: 'dsh-dev', path: '/tmp/dsh-dev', sessionIds: ['session-a', 'session-b'] },
+      ],
+    },
+    sessionQuery: {
+      readTitleSnapshots: async (ids) =>
+        ids.map((sessionId) => ({
+          sessionId,
+          status: 'fulfilled',
+          value: { title: { title: sessionId === 'session-a' ? '会话甲' : '会话乙' } },
+        })),
+    },
+  };
+  const { root, service } = await setup({ services });
+  try {
+    const created = await post(service, { action: 'create', displayName: '挂载位置', body: '# 挂载位置\n\n查看挂载。' });
+    const slug = created.payload.skill.slug;
+    await post(service, { action: 'mounts', sessionId: 'session-a', add: [slug] });
+    await post(service, { action: 'mounts', sessionId: 'session-b', add: [slug] });
+    const info = await post(service, { action: 'mount-info', slug });
+    assert.equal(info.status, 200);
+    assert.equal(info.payload.skill.slug, slug);
+    assert.equal(info.payload.skill.mountedSessions, 2);
+    const byId = new Map(info.payload.sessions.map((entry) => [entry.sessionId, entry]));
+    assert.equal(byId.get('session-a').title, '会话甲');
+    assert.equal(byId.get('session-a').workspaceTitle, 'dsh-dev');
+    assert.equal(byId.get('session-b').title, '会话乙');
+    assert.equal(byId.get('session-b').workspacePath, '/tmp/dsh-dev');
+    assert.ok(byId.get('session-a').mountedAt);
+  } finally {
+    await cleanup(root);
+  }
+});
+
+test('mount-info rejects unknown and missing slugs', async () => {
+  const { root, service } = await setup();
+  try {
+    const unknown = await post(service, { action: 'mount-info', slug: 'nope-skill' });
+    assert.equal(unknown.status, 404);
+    const missing = await post(service, { action: 'mount-info' });
+    assert.equal(missing.status, 400);
+  } finally {
+    await cleanup(root);
+  }
+});

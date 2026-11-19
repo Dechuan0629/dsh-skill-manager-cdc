@@ -18,6 +18,7 @@ import { SkillCatalog } from './lib/catalog.js';
 import { fail } from './lib/errors.js';
 import { headerValue, readJsonBody, readRawBody, requireMethod, sameOrigin, send, sendError } from './lib/http.js';
 import { describeModel, generateDraft, tryGenerateName } from './lib/llm.js';
+import { describeSkillMounts } from './lib/mount-info.js';
 import { cleanDisplayName, defaultDescription, deriveSlug, humanizeSlug, normalizeManualDisplayName } from './lib/naming.js';
 import { resolveLayout, writeFileAtomic } from './lib/paths.js';
 import { STAGING_TTL_MS, MAX_STAGING, StagingStore } from './lib/staging.js';
@@ -293,6 +294,25 @@ export function createService(ctx, { layout = resolveLayout() } = {}) {
     return { skill };
   }
 
+  /**
+   * Where is one Skill mounted? Returns every mounting session together with
+   * its Workspace label and log-backed title (cold sessions included).
+   */
+  async function actionMountInfo(payload) {
+    const slug = typeof payload.slug === 'string' ? payload.slug.trim() : '';
+    if (!slug) fail('bad_request', '缺少 Skill 标识');
+    const { bySlug } = await listSnapshot();
+    const skill = bySlug.get(slug);
+    if (!skill) fail('not_found', `Skill 不存在：${slug}`);
+    const mounts = await store.sessionsWithSkill(slug);
+    const updatedAt = new Map(mounts.map((mount) => [mount.sessionId, mount.updatedAt]));
+    const sessions = await describeSkillMounts(ctx, { sessionIds: mounts.map((mount) => mount.sessionId) });
+    return {
+      skill: { ...skill, mountedSessions: sessions.length },
+      sessions: sessions.map((entry) => ({ ...entry, mountedAt: updatedAt.get(entry.sessionId) || '' })),
+    };
+  }
+
   async function actionMounts(payload) {
     const sessionId = sessionIdOf(payload.sessionId);
     const add = slugListOf(payload.add);
@@ -318,6 +338,7 @@ export function createService(ctx, { layout = resolveLayout() } = {}) {
     ['delete', actionDelete],
     ['content', actionContent],
     ['mounts', actionMounts],
+    ['mount-info', actionMountInfo],
   ]);
 
   async function handleAction(request, response) {

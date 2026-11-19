@@ -117,6 +117,17 @@ window.__ModuleLoader__.load({
 .smx-row-desc{font-size:12px;color:var(--dsw-alias-label-tertiary,#8a8a8a);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;line-height:1.45;}
 .smx-badge{font-size:11px;padding:1px 6px;border-radius:999px;background:var(--dsw-alias-bg-layer-1,#eef0f3);color:var(--dsw-alias-label-secondary,#555);font-weight:500;}
 .smx-badge-ok{background:rgba(18,128,92,.1);color:var(--dsw-alias-state-success-primary,#12805c);}
+.smx-badge-link{cursor:pointer;font:inherit;line-height:inherit;border:1px solid transparent;}
+.smx-badge-link:hover{text-decoration:underline;}
+.smx-mount-group{display:flex;flex-direction:column;gap:6px;padding:10px 0;border-top:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.08));}
+.smx-mount-group:first-child{border-top:0;padding-top:0;}
+.smx-mount-head{display:flex;align-items:baseline;gap:8px;min-width:0;}
+.smx-mount-title{font-weight:600;font-size:13px;}
+.smx-mount-path{font-size:11.5px;color:var(--dsw-alias-label-tertiary,#8a8a8a);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.smx-mount-session{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:8px;background:var(--dsw-alias-bg-layer-1,#f7f7f7);}
+.smx-mount-session-main{min-width:0;flex:1;display:flex;flex-direction:column;gap:1px;}
+.smx-mount-session-title{font-size:12.5px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.smx-mount-session-meta{font-size:11px;color:var(--dsw-alias-label-tertiary,#8a8a8a);font-family:var(--dsh-font-family-code,ui-monospace);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .smx-menu-item{display:flex;align-items:center;gap:8px;width:100%;padding:7px 10px;border:0;border-radius:7px;background:transparent;color:inherit;font:inherit;font-size:13px;text-align:left;cursor:pointer;}
 .smx-menu-item:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(0,0,0,.06));}
 .smx-menu-icon{display:inline-flex;align-items:center;justify-content:center;width:16px;flex:none;}
@@ -218,6 +229,7 @@ window.__ModuleLoader__.load({
       dialog: null,
       sessionDialog: { status: 'idle', skills: [], mounted: [], selected: new Set(), error: null, dirty: false },
       mySkillsPicker: { status: 'idle', skills: [], mounted: [], selected: new Set(), error: null, dirty: false },
+      mountInfo: { active: false, status: 'idle', skill: null, sessions: [], error: null },
       composerActions: new Map(),
       composerActionsLive: new Map(),
       listeners: new Set(),
@@ -225,6 +237,7 @@ window.__ModuleLoader__.load({
 
     let statePromise = null;
     let layoutService = null;
+    let uiWorkspaceService = null;
 
     function notify() {
       store.revision += 1;
@@ -325,6 +338,37 @@ window.__ModuleLoader__.load({
         if (store.dialog?.kind !== 'session' || store.dialog.sessionId !== sessionId) return;
         store.sessionDialog = { status: 'error', skills: [], mounted: [], selected: new Set(), error: messageOf(error), dirty: false };
       }
+      notify();
+    }
+
+    /**
+     * Show where one Skill is mounted: workspace + session labels are resolved
+     * Host-side from the workspace registry and the log-backed title fold.
+     */
+    async function openMountInfo(skill) {
+      const slug = String(skill?.slug || '');
+      if (!slug) return;
+      store.mountInfo = { active: true, status: 'loading', skill, sessions: [], error: null };
+      notify();
+      try {
+        const result = await apiPost('/action', { action: 'mount-info', slug });
+        if (!store.mountInfo.active || store.mountInfo.skill?.slug !== slug) return;
+        store.mountInfo = {
+          active: true,
+          status: 'ready',
+          skill: result.skill || skill,
+          sessions: Array.isArray(result.sessions) ? result.sessions : [],
+          error: null,
+        };
+      } catch (error) {
+        if (!store.mountInfo.active || store.mountInfo.skill?.slug !== slug) return;
+        store.mountInfo = { active: true, status: 'error', skill, sessions: [], error: messageOf(error) };
+      }
+      notify();
+    }
+
+    function closeMountInfo() {
+      store.mountInfo = { active: false, status: 'idle', skill: null, sessions: [], error: null };
       notify();
     }
 
@@ -691,6 +735,7 @@ window.__ModuleLoader__.load({
                   onDetail: (value) => void openDetail(value),
                   onDelete: (value) => void deleteSkill(value),
                   onCopy: (value) => void copyCommand(value),
+                  onMounts: (value) => void openMountInfo(value),
                 }),
               ),
             ),
@@ -930,14 +975,24 @@ window.__ModuleLoader__.load({
       return renderSubRowFor(store.state.data);
     }
 
-    function SkillCard({ skill, onDetail, onDelete, onCopy }) {
+    function SkillCard({ skill, onDetail, onDelete, onCopy, onMounts }) {
       const mounted = Number(skill.mountedSessions || 0);
       const scripts = Array.isArray(skill.scripts) ? skill.scripts.length : 0;
       return h('div', { className: 'smx-card', 'data-smx': 'skill-card', 'data-slug': skill.slug },
         h('div', { className: 'smx-card-head' },
           h(SkillIcon, { size: 16 }),
           h('div', { className: 'smx-card-name', title: skill.displayName }, skill.displayName),
-          mounted > 0 ? h('span', { className: 'smx-badge smx-badge-ok' }, `已挂载 ${mounted}`) : null),
+          mounted > 0
+            ? h('button', {
+                type: 'button',
+                className: 'smx-badge smx-badge-ok smx-badge-link',
+                title: '查看它在哪些工作区、哪些会话中被挂载',
+                onClick: (event) => {
+                  event.stopPropagation();
+                  onMounts(skill);
+                },
+              }, `已挂载 ${mounted}`)
+            : null),
         h('div', { className: 'smx-code', title: skill.slug }, `/${skill.slug}`),
         h('div', { className: 'smx-card-desc' }, skill.description || '（无描述）'),
         h('div', { className: 'smx-card-foot' },
@@ -1204,6 +1259,124 @@ window.__ModuleLoader__.load({
             h('button', { type: 'button', className: 'smx-btn smx-btn-sm smx-btn-primary', disabled: !ready, onClick: confirm }, '使用勾选的 Skill'))));
     }
 
+    // --------------------------------------------------- mount info dialog
+
+    function shortSessionId(sessionId) {
+      const value = String(sessionId || '');
+      if (value.length <= 26) return value;
+      return `${value.slice(0, 10)}…${value.slice(-8)}`;
+    }
+
+    function formatMountedAt(value) {
+      if (!value) return '';
+      const time = Date.parse(value);
+      if (!Number.isFinite(time)) return '';
+      const date = new Date(time);
+      const pad = (part) => String(part).padStart(2, '0');
+      return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+    }
+
+    /**
+     * Read-only view: which workspace owns each session that mounts this Skill.
+     * Opening a row is optional — the dialog still works without uiWorkspace.
+     */
+    function MountInfoDialog() {
+      useRevision();
+      const info = store.mountInfo;
+      const active = info?.active === true;
+
+      useEffect(() => {
+        if (!active) return undefined;
+        const onKey = (event) => {
+          if (event.key === 'Escape') closeMountInfo();
+        };
+        window.addEventListener('keydown', onKey);
+        return () => window.removeEventListener('keydown', onKey);
+      }, [active]);
+
+      if (!active) return null;
+
+      const skill = info.skill || {};
+      const sessions = Array.isArray(info.sessions) ? info.sessions : [];
+      const groups = new Map();
+      for (const session of sessions) {
+        if (!session || typeof session !== 'object') continue;
+        const key = String(session.workspaceId || '');
+        if (!groups.has(key)) {
+          groups.set(key, {
+            key: key || 'unassigned',
+            title: String(session.workspaceTitle || '') || '未归属工作区',
+            path: String(session.workspacePath || ''),
+            items: [],
+          });
+        }
+        groups.get(key).items.push(session);
+      }
+      const ordered = [...groups.values()].sort((left, right) => {
+        const leftUnowned = left.key === 'unassigned';
+        const rightUnowned = right.key === 'unassigned';
+        if (leftUnowned !== rightUnowned) return leftUnowned ? 1 : -1;
+        return left.title.localeCompare(right.title, 'zh-Hans-CN');
+      });
+      const canOpen = Boolean(uiWorkspaceService && typeof uiWorkspaceService.openSession === 'function');
+      const openSession = (sessionId) => {
+        try {
+          uiWorkspaceService?.openSession?.(sessionId);
+        } catch (error) {
+          console.warn('[dsh-skill-manager] could not open the session', error);
+        }
+        closeMountInfo();
+      };
+
+      const body = [];
+      if (info.status === 'loading') {
+        body.push(h('div', { key: 'loading', className: 'smx-empty' }, h('span', { className: 'smx-spin' }), '正在解析挂载位置…'));
+      } else if (info.status === 'error') {
+        body.push(h('div', { key: 'error', className: 'smx-banner smx-banner-error' }, info.error || '读取失败'));
+      } else if (!ordered.length) {
+        body.push(h('div', { key: 'empty', className: 'smx-empty' }, '当前没有任何会话挂载这个 Skill。'));
+      } else {
+        for (const group of ordered) {
+          body.push(
+            h('div', { key: group.key, className: 'smx-mount-group' },
+              h('div', { className: 'smx-mount-head' },
+                h(SkillIcon, { size: 14 }),
+                h('span', { className: 'smx-mount-title' }, group.title),
+                group.path ? h('span', { className: 'smx-mount-path', title: group.path }, group.path) : null),
+              ...group.items.map((session) => {
+                const title = String(session.title || '') || '（未命名会话）';
+                const mountedAt = formatMountedAt(session.mountedAt);
+                return h('div', { key: String(session.sessionId), className: 'smx-mount-session' },
+                  h('div', { className: 'smx-mount-session-main' },
+                    h('div', { className: 'smx-mount-session-title', title }, title),
+                    h('div', { className: 'smx-mount-session-meta', title: String(session.sessionId) },
+                      shortSessionId(session.sessionId),
+                      mountedAt ? ` · 挂载于 ${mountedAt}` : '')),
+                  canOpen
+                    ? h('button', { type: 'button', className: 'smx-btn smx-btn-sm smx-btn-ghost', onClick: () => openSession(session.sessionId) }, '打开')
+                    : null);
+              })),
+          );
+        }
+      }
+
+      return h('div', { className: 'smx smx-mask', 'data-smx': 'mount-info-dialog', onClick: (event) => { if (event.target === event.currentTarget) closeMountInfo(); } },
+        h('div', { className: 'smx-dialog', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Skill 挂载位置' },
+          h('div', { className: 'smx-dialog-head' },
+            h(SkillIcon, { size: 18 }),
+            h('div', { className: 'smx-dialog-title' }, `「${skill.displayName || skill.slug || ''}」挂载位置`),
+            h('span', { className: 'smx-spacer' }),
+            h('button', { type: 'button', className: 'smx-btn smx-btn-sm smx-btn-ghost', 'aria-label': '关闭', onClick: closeMountInfo }, '✕')),
+          h('div', { className: 'smx-dialog-body' },
+            h('div', { className: 'smx-sub', style: { padding: '0 0 10px' } },
+              '按工作区分组显示挂载该 Skill 的会话；标题来自会话日志，冷会话也会显示。'),
+            ...body),
+          h('div', { className: 'smx-dialog-foot' },
+            h('span', { className: 'smx-muted' }, info.status === 'ready' ? `${sessions.length} 个会话` : ''),
+            h('span', { className: 'smx-spacer' }),
+            h('button', { type: 'button', className: 'smx-btn smx-btn-sm', onClick: closeMountInfo }, '关闭'))));
+    }
+
     // ---------------------------------------------------------------- apply
 
     function SidebarSkillsIcon({ size = 16, active }) {
@@ -1217,6 +1390,11 @@ window.__ModuleLoader__.load({
         layoutService = typeof ctx.get === 'function' ? ctx.get('layout') ?? null : null;
       } catch {
         layoutService = null;
+      }
+      try {
+        uiWorkspaceService = typeof ctx.get === 'function' ? ctx.get('uiWorkspace') ?? null : null;
+      } catch {
+        uiWorkspaceService = null;
       }
       installStyles();
 
@@ -1290,6 +1468,7 @@ window.__ModuleLoader__.load({
         register({ name: 'sidebar.workspaces.session.menu.item', id: 'skill-manager-session', order: 460 }, SessionSkillsMenuItem);
         register({ name: 'shell.overlay', id: 'skill-manager-session-dialog', order: 62 }, SessionSkillsDialog);
         register({ name: 'shell.overlay', id: 'skill-manager-my-skills-dialog', order: 63 }, MySkillsDialog);
+        register({ name: 'shell.overlay', id: 'skill-manager-mount-info-dialog', order: 64 }, MountInfoDialog);
         register({ name: 'conversation.input.overlay', id: 'skill-manager-my-skills-trigger', order: 4 }, MySkillsTrigger);
       };
 

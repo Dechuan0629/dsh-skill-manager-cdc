@@ -96,6 +96,7 @@ scripts/run.sh
 - 也可以在输入框键入 `/my`，在补全菜单里选「自定义 SKILLS · /mySkills」打开同一个选择器；它注册为 client 命令（`commandUi`），所以补全行会像 `/plan` 一样显示标题与别名。命令路径与输入手势分享同一个草稿写入通道，选中后同样只改草稿、不发送。
 - 会话「⋯」→「自定义 Skills」弹窗在勾选发生变化前，「保存挂载」保持禁用，避免误点把已挂载项清空。
 - 会话「⋯」菜单 →「自定义 Skills」可随时增删挂载。
+- 面板卡片上的「已挂载 N」是一个按钮：点开按工作区分组列出挂载该 Skill 的会话（会话名来自日志标题，冷会话也会显示），可一键跳到对应会话。
 - `/` 补全里的「自定义 SKILLS」分组只负责插入 `/<slug>`；它与 DSH 自带的「技能」分组一样走 `dsh-tool-skill` 的 `/slug` 手势，不发送消息、不改写草稿里的其它内容。
 
 ## HTTP 接口
@@ -107,7 +108,7 @@ scripts/run.sh
 | GET | `/dsh-skill-manager/state` | 技能列表、无效目录、模型状态、限制 |
 | GET | `/dsh-skill-manager/session?sessionId=` | 某会话的挂载与可用技能 |
 | POST | `/dsh-skill-manager/import` | 原始压缩包字节；`x-skill-manager-filename` 头携带文件名 |
-| POST | `/dsh-skill-manager/action` | `generate` / `generate-name` / `create` / `create-imported` / `discard-import` / `delete` / `content` / `mounts` |
+| POST | `/dsh-skill-manager/action` | `generate` / `generate-name` / `create` / `create-imported` / `discard-import` / `delete` / `content` / `mounts` / `mount-info` |
 
 - `generate` 接收 `{ prompt, withScripts? }`：`withScripts: true` 时草稿额外返回 `scripts: [{ name, content, bytes }]` 与 `warnings`（例如只有 `.sh` 时的 Windows 脚本缺失提示）。
 - `create` 接收 `{ displayName?, slug?, description?, whenToUse?, body, scripts?, sessionId? }`：`scripts` 每项为 `{ name, content }`，文件名必须在 `scripts/` 下且扩展名在白名单内；创建时写入 `scripts/`，并在正文末尾补一段「脚本与环境」说明（已包含 `scripts/` 文字时不会重复追加）。
@@ -144,6 +145,7 @@ dsh-skill-manager/
 │   ├── http.js              # 同源校验、请求体读取、JSON 响应
 │   ├── llm.js               # 走 DSH 默认模型：起名 / 生成草稿
 │   ├── manifest.js          # SKILL.md frontmatter 解析与序列化
+│   ├── mount-info.js        # 挂载位置：工作区 + 会话标题（冷会话可读）
 │   ├── naming.js            # 显示名 / slug 规则、AI 结果归一化
 │   ├── paths.js             # ~/.dsh 布局、slug 与路径安全
 │   ├── scripts.js           # scripts 脚本白名单 / 归一化 / 跨平台配对提示

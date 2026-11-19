@@ -89,13 +89,14 @@ export async function makeZipFixture(root, { wrapper = 'demo-skill', skillFile =
 }
 
 /** A fake context exposing the model services the Host half consumes. */
-export function fakeContext({ selection = { provider: 'deepseek-account', model: 'deepseek-flash' }, reply = '{"displayName":"文档解析"}', replies = null } = {}) {
+export function fakeContext({ selection = { provider: 'deepseek-account', model: 'deepseek-flash' }, reply = '{"displayName":"文档解析"}', replies = null, services = {} } = {}) {
   const warnings = [];
   const answers = Array.isArray(replies) ? replies : [reply];
   let answerIndex = 0;
   const ctx = {
     warnings,
     get(name) {
+      if (Object.hasOwn(services, name)) return services[name];
       if (name === 'agentDefaultModel') {
         return selection === null ? undefined : { currentSelection: () => selection };
       }
