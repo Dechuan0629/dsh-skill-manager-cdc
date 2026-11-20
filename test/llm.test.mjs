@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { describeModel, generateDraft, generateName, tryGenerateName } from '../lib/llm.js';
+import { describeModel, generateDraft, generateName, generateSummary, tryGenerateName, tryGenerateSummary } from '../lib/llm.js';
 import { fakeContext } from './helpers.mjs';
 
 function emptyContext() {
@@ -73,4 +73,22 @@ test('generateDraft adds marker-parsed scripts when withScripts is set', async (
   assert.deepEqual(withScripts.warnings, []);
   const plain = await generateDraft(ctx, { prompt: '把 CSV 转成 Markdown' });
   assert.deepEqual(plain.scripts, []);
+});
+
+test('generateSummary flattens markdown and enforces the card limits', async () => {
+  const long = '很长的摘要。'.repeat(30);
+  const ctx = fakeContext({ reply: JSON.stringify({ summary: `**${long}**`, usage: '- 用 /demo-skill 调用\n- 说明' }) });
+  const result = await generateSummary(ctx, { name: 'demo-skill', description: '示例', body: '# demo\n\n正文。' });
+  assert.ok(result.summary.length <= 60);
+  assert.doesNotMatch(result.summary, /[*\n]/);
+  assert.equal(result.usage, '用 /demo-skill 调用 说明');
+  assert.equal(result.model, 'deepseek-flash');
+});
+
+test('tryGenerateSummary degrades when the model answer is unusable', async () => {
+  const ctx = fakeContext({ reply: 'not json at all' });
+  const result = await tryGenerateSummary(ctx, { name: 'demo-skill', body: '# demo\n\n正文。' });
+  assert.equal(result.degraded, true);
+  assert.equal(result.summary, '');
+  assert.match(result.warning, /AI 摘要生成失败/);
 });

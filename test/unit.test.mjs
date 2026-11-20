@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -6,13 +7,22 @@ import { cleanup, tempDir } from './helpers.mjs';
 import { SkillError } from '../lib/errors.js';
 import {
   hashSlug,
-  isManagedSkillId,
+  isSkillDirName,
   normalizeSlug,
+  normalizeUserSlug,
   resolveLayout,
   safeJoin,
   writeFileAtomic,
 } from '../lib/paths.js';
-import { findSkillFile, parseSkillMarkdown, serializeSkillMarkdown, validateFinalSkill } from '../lib/manifest.js';
+import { SummaryStore, bodyDigest } from '../lib/summaries.js';
+import {
+  findSkillFile,
+  parseSkillMarkdown,
+  rewriteInvocationPolicy,
+  serializeSkillMarkdown,
+  skillLoadIssues,
+  validateFinalSkill,
+} from '../lib/manifest.js';
 import {
   deriveSlug,
   normalizeAiDisplayName,
@@ -44,12 +54,14 @@ test('layout lives under the DSH home', async () => {
   }
 });
 
-test('slug rules: managed ids end with -skill and stay ascii kebab', () => {
+test('slug rules: skill directories are any ascii kebab name', () => {
   assert.equal(normalizeSlug('Doc Parser'), 'doc-parser-skill');
   assert.equal(normalizeSlug('doc-parser-skill'), 'doc-parser-skill');
-  assert.ok(isManagedSkillId('demo-skill'));
-  assert.ok(!isManagedSkillId('demo'));
-  assert.ok(!isManagedSkillId('Demo-Skill'));
+  assert.equal(normalizeUserSlug('Demo Tool'), 'demo-tool');
+  assert.equal(normalizeUserSlug('tdd'), 'tdd');
+  assert.ok(isSkillDirName('demo'));
+  assert.ok(isSkillDirName('demo-skill'));
+  assert.ok(!isSkillDirName('Demo-Skill'));
   assert.ok(hashSlug('中文名', 'body').startsWith('custom-'));
 });
 
@@ -77,7 +89,44 @@ test('SKILL.md frontmatter round trips and validates', () => {
   assert.equal(parsed.userInvocable, true);
   assert.match(parsed.body, /步骤一/);
   validateFinalSkill(parsed, { expectedSlug: 'demo-skill' });
+  validateFinalSkill(parsed, { expectedSlug: null });
   expectCode(() => validateFinalSkill(parsed, { expectedSlug: 'other-skill' }), 'invalid_skill');
+});
+
+test('skillLoadIssues mirrors DSH load rules and flags legacy keys', () => {
+  const ok = parseSkillMarkdown(serializeSkillMarkdown({ name: 'tdd', description: '测试驱动', body: '# TDD' }));
+  assert.deepEqual(skillLoadIssues(ok), []);
+  const missing = parseSkillMarkdown('---\nname: tdd\n---\nbody');
+  assert.ok(skillLoadIssues(missing).some((issue) => issue.includes('description')));
+  const legacy = parseSkillMarkdown('---\nname: tdd\ndescription: d\nmodelInvocable: true\n---\nbody');
+  assert.deepEqual(legacy.legacyKeys.map((entry) => entry.key), ['modelInvocable']);
+  assert.ok(skillLoadIssues(legacy).some((issue) => issue.includes('modelInvocable')));
+});
+
+test('rewriteInvocationPolicy only touches the policy line', () => {
+  const manual = '---\nname: "demo"\ndescription: "d"\ndisplayName: "演示"\nwhenToUse: "x"\n---\n\n# body\n';
+  const toAuto = rewriteInvocationPolicy(`${manual.replace('whenToUse: "x"\n', 'whenToUse: "x"\ndisable-model-invocation: true\n')}`, { modelInvocable: true });
+  assert.equal(toAuto.changed, true);
+  assert.ok(!toAuto.text.includes('disable-model-invocation'));
+  assert.ok(toAuto.text.includes('displayName: "演示"'));
+  const toManual = rewriteInvocationPolicy(manual, { modelInvocable: false });
+  assert.equal(toManual.changed, true);
+  assert.equal(
+    toManual.text,
+    '---\nname: "demo"\ndescription: "d"\ndisplayName: "演示"\nwhenToUse: "x"\ndisable-model-invocation: true\n---\n\n# body\n',
+  );
+  const idempotent = rewriteInvocationPolicy(toManual.text, { modelInvocable: false });
+  assert.equal(idempotent.changed, false);
+  assert.equal(idempotent.text, toManual.text);
+});
+
+test('rewriteInvocationPolicy preserves CRLF and repairs legacy keys', () => {
+  const crlf = '---\r\nname: "demo"\r\ndescription: "d"\r\ndisable-model-invocation: true\r\nmodelInvocable: true\r\n---\r\n\r\nbody\r\n';
+  const result = rewriteInvocationPolicy(crlf, { modelInvocable: true });
+  assert.equal(result.changed, true);
+  assert.deepEqual(result.repaired, ['modelInvocable']);
+  assert.ok(!result.text.includes('disable-model-invocation'));
+  assert.ok(result.text.includes('\r\nname: "demo"\r\n'));
 });
 
 test('findSkillFile accepts a lowercase skill.md', async () => {
@@ -157,4 +206,32 @@ test('script names are normalized and whitelisted', async () => {
   const body = withEnvironmentNote('# demo\n\n步骤。', scripts);
   assert.match(body, /脚本与环境/);
   assert.equal(withEnvironmentNote(body, scripts), body);
+});
+
+test('summary records are keyed by directory and detect stale bodies', async () => {
+  const root = await tempDir();
+  try {
+    const layout = resolveLayout(root);
+    const store = new SummaryStore(layout);
+    await store.load();
+    assert.equal(store.get('demo-skill'), undefined);
+
+    await store.set('demo-skill', { summary: '把文本整理成要点', usage: '用 /demo-skill 调用', bodyHash: bodyDigest('one') });
+    assert.equal(store.get('demo-skill').summary, '把文本整理成要点');
+
+    const reloaded = new SummaryStore(layout);
+    await reloaded.load();
+    assert.equal(reloaded.get('demo-skill').usage, '用 /demo-skill 调用');
+
+    const fresh = await reloaded.snapshot('demo-skill', 'one');
+    assert.equal(fresh.stale, false);
+    const stale = await reloaded.snapshot('demo-skill', 'two');
+    assert.equal(stale.stale, true);
+
+    await reloaded.remove('demo-skill');
+    assert.equal(reloaded.get('demo-skill'), undefined);
+    assert.equal(existsSync(`${layout.manager}/summaries/demo-skill.json`), false);
+  } finally {
+    await cleanup(root);
+  }
 });

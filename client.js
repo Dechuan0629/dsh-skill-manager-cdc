@@ -38,6 +38,10 @@ window.__ModuleLoader__.load({
     const SCRIPT_EXTENSIONS = SCRIPT_ACCEPT.split(',');
     const SCRIPT_MAX_BYTES = 128 * 1024;
     const SCRIPT_IMPORT_LIMIT = 20;
+    const INVOCATION_HINT = {
+      auto: '模型在相关任务里可以自动挑选并注入该 Skill，会占用每轮上下文的 token。',
+      manual: '只有你用 /<name> 或 /mySkills 显式调用时才注入。',
+    };
 
     // ---------------------------------------------------------------- styles
 
@@ -68,6 +72,12 @@ window.__ModuleLoader__.load({
 .smx-card-head{display:flex;align-items:center;gap:8px;min-width:0;}
 .smx-card-name{font-size:14px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .smx-code{font-family:var(--dsh-font-family-code,ui-monospace,SFMono-Regular,Menlo,monospace);font-size:12px;color:var(--dsw-alias-label-tertiary,#8a8a8a);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.smx-card-summary{font-size:12.5px;color:var(--dsw-alias-label-primary,#1a1a1a);line-height:1.5;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-height:19px;}
+.smx-card-summary.is-empty{color:var(--dsw-alias-label-tertiary,#9a9a9a);}
+.smx-card-usage{font-size:12px;color:var(--dsw-alias-label-secondary,#555);line-height:1.5;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-height:18px;}
+.smx-card-usage .smx-usage-label{color:var(--dsw-alias-label-tertiary,#8a8a8a);margin-right:5px;}
+.smx-card-usage.is-empty{color:var(--dsw-alias-label-tertiary,#9a9a9a);}
+.smx-card-stale{font-size:11.5px;color:var(--dsw-alias-state-warn-primary,#a15c00);}
 .smx-card-desc{font-size:12.5px;color:var(--dsw-alias-label-secondary,#555);display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;min-height:34px;line-height:1.45;}
 .smx-card-foot{display:flex;align-items:center;gap:6px;margin-top:auto;}
 .smx-form{max-width:780px;display:flex;flex-direction:column;gap:12px;padding-top:4px;}
@@ -119,6 +129,22 @@ window.__ModuleLoader__.load({
 .smx-badge-ok{background:rgba(18,128,92,.1);color:var(--dsw-alias-state-success-primary,#12805c);}
 .smx-badge-link{cursor:pointer;font:inherit;line-height:inherit;border:1px solid transparent;}
 .smx-badge-link:hover{text-decoration:underline;}
+".smx-badge-auto{background:rgba(77,107,254,.12);color:var(--dsw-alias-brand-primary,#4d6bfe);}
+.smx-badge-manual{background:var(--dsw-alias-bg-layer-1,#eef0f3);color:var(--dsw-alias-label-secondary,#555);}
+.smx-badge-external{background:transparent;border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.14));color:var(--dsw-alias-label-tertiary,#8a8a8a);}
+.smx-note-warn{font-size:12px;color:var(--dsw-alias-state-warn-primary,#a15c00);line-height:1.45;}
+.smx-filters{display:flex;align-items:center;gap:6px;padding:0 18px 10px;flex-wrap:wrap;}
+.smx-filter{height:26px;padding:0 10px;border-radius:999px;border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.12));background:transparent;color:var(--dsw-alias-label-secondary,#555);font:inherit;font-size:12px;cursor:pointer;display:inline-flex;align-items:center;gap:5px;}
+.smx-filter[aria-pressed="true"]{background:var(--dsw-alias-bg-layer-2,#e9ecef);color:var(--dsw-alias-label-primary,#1a1a1a);border-color:transparent;}
+.smx-switch{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--dsw-alias-label-secondary,#555);cursor:pointer;}
+.smx-switch input{appearance:none;-webkit-appearance:none;width:30px;height:17px;border-radius:999px;background:rgba(0,0,0,.18);position:relative;cursor:pointer;transition:background .15s ease;margin:0;flex:none;}
+.smx-switch input:checked{background:var(--dsw-alias-brand-primary,#4d6bfe);}
+.smx-switch input::after{content:"";position:absolute;top:2px;left:2px;width:13px;height:13px;border-radius:50%;background:#fff;transition:transform .15s ease;}
+.smx-switch input:checked::after{transform:translateX(13px);}
+.smx-switch input:disabled{opacity:.5;cursor:not-allowed;}
+.smx-seg{display:inline-flex;border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.12));border-radius:9px;overflow:hidden;}
+.smx-seg button{border:0;background:transparent;color:var(--dsw-alias-label-secondary,#555);font:inherit;font-size:12.5px;padding:6px 12px;cursor:pointer;}
+.smx-seg button[aria-pressed="true"]{background:var(--dsw-alias-bg-layer-2,#e9ecef);color:var(--dsw-alias-label-primary,#1a1a1a);font-weight:600;}
 .smx-mount-group{display:flex;flex-direction:column;gap:6px;padding:10px 0;border-top:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.08));}
 .smx-mount-group:first-child{border-top:0;padding-top:0;}
 .smx-mount-head{display:flex;align-items:baseline;gap:8px;min-width:0;}
@@ -230,6 +256,7 @@ window.__ModuleLoader__.load({
       sessionDialog: { status: 'idle', skills: [], mounted: [], selected: new Set(), error: null, dirty: false },
       mySkillsPicker: { status: 'idle', skills: [], mounted: [], selected: new Set(), error: null, dirty: false },
       mountInfo: { active: false, status: 'idle', skill: null, sessions: [], error: null },
+      summaryBusy: new Set(),
       composerActions: new Map(),
       composerActionsLive: new Map(),
       listeners: new Set(),
@@ -436,6 +463,19 @@ window.__ModuleLoader__.load({
       );
     }
 
+    function InvocationSeg({ value, onChange, disabled = false }) {
+      return h('div', { className: 'smx-field' },
+        h('span', { className: 'smx-label' }, '注入方式'),
+        h('div', { className: 'smx-seg', role: 'group', 'aria-label': '注入方式' },
+          h('button', { type: 'button', 'aria-pressed': value === 'auto' ? 'true' : 'false', disabled, onClick: () => onChange('auto') }, '自动'),
+          h('button', { type: 'button', 'aria-pressed': value === 'manual' ? 'true' : 'false', disabled, onClick: () => onChange('manual') }, '手动（推荐）')),
+        h('span', { className: 'smx-hint' }, INVOCATION_HINT[value] || INVOCATION_HINT.manual));
+    }
+
+    function skillToken(skill) {
+      return `/${skill?.name || skill?.slug || ''}`;
+    }
+
     // ---------------------------------------------------------------- panel
 
     function SkillManagerPanel() {
@@ -444,6 +484,11 @@ window.__ModuleLoader__.load({
       const [mode, setMode] = useState('ai');
       const [aiPrompt, setAiPrompt] = useState('');
       const [withScripts, setWithScripts] = useState(true);
+      const [createInvocation, setCreateInvocation] = useState('manual');
+      const [summaryText, setSummaryText] = useState('');
+      const [usageText, setUsageText] = useState('');
+      const [importInvocation, setImportInvocation] = useState('manual');
+      const [invocationFilter, setInvocationFilter] = useState('all');
       const [draft, setDraft] = useState(EMPTY_DRAFT);
       const [scripts, setScripts] = useState([]);
       const [draftWarnings, setDraftWarnings] = useState([]);
@@ -476,6 +521,9 @@ window.__ModuleLoader__.load({
         setMode('ai');
         setAiPrompt('');
         setWithScripts(true);
+        setCreateInvocation('manual');
+        setSummaryText('');
+        setUsageText('');
         setDraft(EMPTY_DRAFT);
         setScripts([]);
         setDraftWarnings([]);
@@ -580,6 +628,10 @@ window.__ModuleLoader__.load({
             description: draft.description.trim() || undefined,
             whenToUse: draft.whenToUse.trim() || undefined,
             body: draft.body,
+            invocation: createInvocation,
+            ...(mode === 'manual'
+              ? { summary: summaryText.trim() || undefined, usage: usageText.trim() || undefined, autoSummary: false }
+              : { autoSummary: true }),
             scripts: scripts.map((script) => ({ name: script.name, content: script.content })),
             prompt: mode === 'ai' ? aiPrompt.trim() || undefined : undefined,
           });
@@ -606,7 +658,9 @@ window.__ModuleLoader__.load({
         setUploading(true);
         try {
           const result = await apiUpload(file);
-          setPreview(result.preview || null);
+          const nextPreview = result.preview || null;
+          setPreview(nextPreview);
+          setImportInvocation(nextPreview?.invocation === 'manual' ? 'manual' : 'auto');
           setImportName('');
         } catch (error) {
           setImportError(messageOf(error));
@@ -624,6 +678,7 @@ window.__ModuleLoader__.load({
             action: 'create-imported',
             stagingId: preview.stagingId,
             displayName: importName.trim() || undefined,
+            invocation: importInvocation,
           });
           await refreshState().catch(() => {});
           setToast(`已导入「${result.skill?.displayName || 'Skill'}」`);
@@ -663,8 +718,54 @@ window.__ModuleLoader__.load({
         }
       }
 
+      async function changeInvocation(skill, next) {
+        if (!skill || (next !== 'auto' && next !== 'manual')) return;
+        if (next === 'manual' && skill.userInvocable === false) {
+          const confirmed = window.confirm(
+            `「${skill.displayName}」同时设置了 user-invocable: false。\n关闭自动注入后，模型不会自动挑选，你也无法用 ${skillToken(skill)} 调用它。\n仍要继续吗？`,
+          );
+          if (!confirmed) return;
+        }
+        try {
+          const result = await apiPost('/action', { action: 'set-invocation', slug: skill.slug, invocation: next });
+          await refreshState().catch(() => {});
+          if (store.dialog === null && view === 'detail') {
+            setDetail((current) => (current.skill?.slug === skill.slug && result.skill ? { ...current, skill: result.skill } : current));
+          }
+          const repaired = Array.isArray(result.repaired) && result.repaired.length ? `，已清理旧字段 ${result.repaired.join('、')}` : '';
+          setToast(next === 'auto'
+            ? `已改为自动：模型会在相关任务里自动挑选该 Skill${repaired}`
+            : `已改为手动：模型不再自动挑选，仍可用 ${skillToken(result.skill || skill)} 调用${repaired}`);
+        } catch (error) {
+          setToast(`切换失败：${messageOf(error)}`);
+        }
+      }
+
+      async function generateSummaryFor(skill) {
+        if (!skill || store.summaryBusy.has(skill.slug)) return;
+        store.summaryBusy.add(skill.slug);
+        notify();
+        try {
+          const result = await apiPost('/action', { action: 'generate-summary', slug: skill.slug });
+          await refreshState().catch(() => {});
+          if (result.degraded) setToast(result.warning || 'AI 摘要生成失败，请稍后重试');
+          else setToast('已生成摘要与用法');
+          if (view === 'detail' && detail.skill?.slug === skill.slug) await openDetail(skill);
+        } catch (error) {
+          setToast(`生成失败：${messageOf(error)}`);
+        } finally {
+          store.summaryBusy.delete(skill.slug);
+          notify();
+        }
+      }
+
       async function deleteSkill(skill) {
-        const confirmed = window.confirm(`删除「${skill.displayName}」？\n所有已挂载该 Skill 的会话会同步移除，此操作不可撤销。`);
+        const target = skill?.dir ? `\n目录：${skill.dir}` : '';
+        if (skill?.managed === false) {
+          const first = window.confirm(`「${skill.displayName}」是外部技能，非本面板创建。${target}\n仍要继续删除吗？`);
+          if (!first) return;
+        }
+        const confirmed = window.confirm(`删除「${skill.displayName}」？${target}\n所有已挂载该 Skill 的会话会同步移除，此操作不可撤销。`);
         if (!confirmed) return;
         try {
           const result = await apiPost('/action', { action: 'delete', slug: skill.slug });
@@ -678,16 +779,22 @@ window.__ModuleLoader__.load({
 
       async function copyCommand(skill) {
         try {
-          await navigator.clipboard.writeText(`/${skill.slug}`);
-          setToast(`已复制 /${skill.slug}`);
+          await navigator.clipboard.writeText(skillToken(skill));
+          setToast(`已复制 ${skillToken(skill)}`);
         } catch {
-          setToast(`/${skill.slug}`);
+          setToast(skillToken(skill));
         }
       }
 
       function renderList() {
         const stateError = store.state.status === 'error' ? store.state.error : '';
         const invalid = Array.isArray(data?.invalid) ? data.invalid : [];
+        const counts = {
+          all: skills.length,
+          auto: skills.filter((skill) => skill.invocation !== 'manual').length,
+          manual: skills.filter((skill) => skill.invocation === 'manual').length,
+        };
+        const filtered = invocationFilter === 'all' ? skills : skills.filter((skill) => skill.invocation === invocationFilter);
         const sections = [];
 
         if (stateError) {
@@ -710,6 +817,18 @@ window.__ModuleLoader__.load({
           );
         }
 
+        if (skills.length) {
+          const label = (key, text) =>
+            h('button', {
+              key,
+              type: 'button',
+              className: 'smx-filter',
+              'aria-pressed': invocationFilter === key ? 'true' : 'false',
+              onClick: () => setInvocationFilter(key),
+            }, `${text} ${counts[key]}`);
+          sections.push(h('div', { key: 'filters', className: 'smx-filters' }, label('all', '全部'), label('auto', '自动'), label('manual', '手动')));
+        }
+
         if (!data && store.state.status === 'loading') {
           sections.push(h('div', { key: 'loading', className: 'smx-empty' }, h('span', { className: 'smx-spin' }), '正在读取 Skill 目录…'));
         } else if (!skills.length) {
@@ -725,10 +844,12 @@ window.__ModuleLoader__.load({
                 h('button', { type: 'button', className: 'smx-btn smx-btn-sm smx-btn-primary', onClick: () => { setImportError(''); setView('import'); } }, '导入压缩包')),
             ),
           );
+        } else if (!filtered.length) {
+          sections.push(h('div', { key: 'filter-empty', className: 'smx-empty' }, `没有${invocationFilter === 'auto' ? '自动' : '手动'}注入的 Skill`));
         } else {
           sections.push(
             h('div', { key: 'grid', className: 'smx-grid' },
-              skills.map((skill) =>
+              filtered.map((skill) =>
                 h(SkillCard, {
                   key: skill.slug,
                   skill,
@@ -736,6 +857,9 @@ window.__ModuleLoader__.load({
                   onDelete: (value) => void deleteSkill(value),
                   onCopy: (value) => void copyCommand(value),
                   onMounts: (value) => void openMountInfo(value),
+                  onInvocation: (value, next) => void changeInvocation(value, next),
+                  onSummary: (value) => void generateSummaryFor(value),
+                  summaryBusy: store.summaryBusy.has(skill.slug),
                 }),
               ),
             ),
@@ -818,13 +942,33 @@ window.__ModuleLoader__.load({
                 h('input', { className: 'smx-input', value: draft.displayName, placeholder: '留空则由 AI 自动命名（3-6 个字）', onChange: (event) => patchDraft({ displayName: event.target.value }) })),
               h('div', { key: 'slug', className: 'smx-field' },
                 h('span', { className: 'smx-label' }, '标识（可选）'),
-                h('input', { className: 'smx-input', value: draft.slug, placeholder: '默认由名称生成，以小写 -skill 结尾', onChange: (event) => patchDraft({ slug: event.target.value }) })),
+                h('input', { className: 'smx-input', value: draft.slug, placeholder: '默认由名称生成（AI 创建带 -skill 后缀），可改成任意小写 kebab-case 标识', onChange: (event) => patchDraft({ slug: event.target.value }) })),
               h('div', { key: 'desc', className: 'smx-field' },
                 h('span', { className: 'smx-label' }, '描述（可选）'),
                 h('input', { className: 'smx-input', value: draft.description, placeholder: '一句话说明它解决什么问题', onChange: (event) => patchDraft({ description: event.target.value }) })),
               h('div', { key: 'when', className: 'smx-field' },
                 h('span', { className: 'smx-label' }, '适用场景（可选）'),
                 h('input', { className: 'smx-input', value: draft.whenToUse, placeholder: '例如：需要在 Excel 里整理表格时', onChange: (event) => patchDraft({ whenToUse: event.target.value }) })),
+              h('div', { key: 'summary', className: 'smx-field' },
+                h('span', { className: 'smx-label' }, '卡片摘要（可选，留空则不生成）'),
+                h('input', {
+                  className: 'smx-input',
+                  value: summaryText,
+                  maxLength: 120,
+                  placeholder: '这是什么、解决什么问题；留空则卡片显示「尚未生成摘要」',
+                  onChange: (event) => setSummaryText(event.target.value),
+                }),
+                h('span', { className: 'smx-hint' }, `${summaryText.length}/120 字；也可以创建后点卡片上的「生成摘要」补上。`)),
+              h('div', { key: 'usage', className: 'smx-field' },
+                h('span', { className: 'smx-label' }, '卡片用法（可选，留空则不生成）'),
+                h('input', {
+                  className: 'smx-input',
+                  value: usageText,
+                  maxLength: 160,
+                  placeholder: '怎么使用、怎么生效，例如「用 /name 显式调用；自动注入时处理长文」',
+                  onChange: (event) => setUsageText(event.target.value),
+                }),
+                h('span', { className: 'smx-hint' }, `${usageText.length}/160 字。`)),
               h('div', { key: 'body', className: 'smx-field' },
                 h('span', { className: 'smx-label' }, 'SKILL.md 提示词正文'),
                 h('textarea', { className: 'smx-textarea smx-textarea-code', value: draft.body, placeholder: '写清步骤、约束与可调用的 scripts/ 脚本用法…', onChange: (event) => patchDraft({ body: event.target.value }) }),
@@ -836,6 +980,7 @@ window.__ModuleLoader__.load({
         return h('div', { className: 'smx-scroll' },
           h('div', { className: 'smx-form' },
             tabs,
+            h(InvocationSeg, { value: createInvocation, onChange: setCreateInvocation }),
             aiBlock,
             fields,
             formError ? h('div', { className: 'smx-banner smx-banner-error' }, formError) : null,
@@ -870,6 +1015,8 @@ window.__ModuleLoader__.load({
               Array.isArray(preview.warnings) && preview.warnings.length
                 ? h('div', { className: 'smx-banner smx-banner-warn' }, h('ul', { style: { margin: 0, paddingLeft: '18px' } }, preview.warnings.map((warning, index) => h('li', { key: index }, warning))))
                 : null,
+              h(InvocationSeg, { value: importInvocation, onChange: setImportInvocation }),
+              h('div', { className: 'smx-hint' }, '确认后会写入技能，并用 AI 生成卡片摘要与用法；也可以在卡片上重新生成。'),
               h('div', { className: 'smx-field' },
                 h('span', { className: 'smx-label' }, '名称（可选）'),
                 h('input', { className: 'smx-input', value: importName, placeholder: '留空则由 AI 阅读 SKILL.md 后自动命名（3-6 个字）', onChange: (event) => setImportName(event.target.value) })),
@@ -913,11 +1060,38 @@ window.__ModuleLoader__.load({
             h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
               h(SkillIcon, { size: 18 }),
               h('strong', { style: { fontSize: '15px' } }, skill.displayName),
-              h('span', { className: 'smx-code' }, `/${skill.slug}`),
+              h('span', { className: 'smx-code' }, skillToken(skill)),
+              h('span', { className: `smx-badge ${skill.invocation === 'manual' ? 'smx-badge-manual' : 'smx-badge-auto'}`, title: skill.invocation === 'manual' ? '手动：仅通过 /name 显式调用' : '自动：模型可自动挑选' }, skill.invocation === 'manual' ? '手动' : '自动'),
+              h('span', { className: 'smx-badge smx-badge-external' }, skill.managed === false ? '外部' : '托管'),
               h('span', { className: 'smx-spacer' }),
               h('button', { type: 'button', className: 'smx-btn smx-btn-sm', onClick: () => void copyCommand(skill) }, '复制命令'),
               h('button', { type: 'button', className: 'smx-btn smx-btn-sm smx-btn-danger', onClick: () => void deleteSkill(skill) }, '删除')),
+            h('div', { className: 'smx-field' },
+              h('span', { className: 'smx-label' }, '卡片摘要与用法（AI 生成，可重新生成）'),
+              h('div', { className: `smx-card-summary${skill.summary ? '' : ' is-empty'}`, style: { WebkitLineClamp: 'unset' } }, skill.summary || '尚未生成摘要'),
+              h('div', { className: `smx-card-usage${skill.usage ? '' : ' is-empty'}`, style: { WebkitLineClamp: 'unset' } },
+                h('span', { className: 'smx-usage-label' }, '用法'),
+                skill.usage || '尚未生成用法'),
+              skill.summaryStale ? h('div', { className: 'smx-card-stale' }, 'SKILL.md 已更新，建议重新生成摘要') : null,
+              h('div', { className: 'smx-actions' },
+                h('button', {
+                  type: 'button',
+                  className: 'smx-btn smx-btn-sm',
+                  disabled: store.summaryBusy.has(skill.slug),
+                  onClick: () => void generateSummaryFor(skill),
+                }, store.summaryBusy.has(skill.slug) ? '生成中…' : skill.summary ? '重新生成摘要与用法' : '生成摘要与用法'))),
             skill.description ? h('div', { className: 'smx-hint' }, skill.description) : null,
+            skill.nameMismatch ? h('div', { className: 'smx-note-warn' }, `目录名与 name 不一致，调用请用 ${skillToken(skill)}`) : null,
+            h('div', { className: 'smx-field' },
+              h('span', { className: 'smx-label' }, '注入方式'),
+              h('label', { className: 'smx-switch' },
+                h('input', {
+                  type: 'checkbox',
+                  checked: skill.invocation !== 'manual',
+                  onChange: (event) => void changeInvocation(skill, event.target.checked ? 'auto' : 'manual'),
+                }),
+                skill.invocation === 'manual' ? '手动注入（仅 /name 显式调用）' : '自动注入（模型可自动挑选）'),
+              h('span', { className: 'smx-hint' }, skill.invocation === 'manual' ? INVOCATION_HINT.manual : INVOCATION_HINT.auto)),
             skill.whenToUse ? h('div', { className: 'smx-hint' }, `适用场景：${skill.whenToUse}`) : null,
             h('dl', { className: 'smx-kv' },
               h('dt', null, '目录'),
@@ -975,13 +1149,20 @@ window.__ModuleLoader__.load({
       return renderSubRowFor(store.state.data);
     }
 
-    function SkillCard({ skill, onDetail, onDelete, onCopy, onMounts }) {
+    function SkillCard({ skill, onDetail, onDelete, onCopy, onMounts, onInvocation, onSummary, summaryBusy }) {
       const mounted = Number(skill.mountedSessions || 0);
       const scripts = Array.isArray(skill.scripts) ? skill.scripts.length : 0;
+      const auto = skill.invocation !== 'manual';
+      const name = skill.name || skill.slug;
       return h('div', { className: 'smx-card', 'data-smx': 'skill-card', 'data-slug': skill.slug },
         h('div', { className: 'smx-card-head' },
           h(SkillIcon, { size: 16 }),
           h('div', { className: 'smx-card-name', title: skill.displayName }, skill.displayName),
+          h('span', {
+            className: `smx-badge ${auto ? 'smx-badge-auto' : 'smx-badge-manual'}`,
+            title: auto ? '自动：模型可自动挑选' : '手动：仅通过 /name 显式调用',
+          }, auto ? '自动' : '手动'),
+          h('span', { className: 'smx-badge smx-badge-external', title: skill.managed === false ? '外部技能：不是本面板创建或导入的' : '托管：本面板创建或导入' }, skill.managed === false ? '外部' : '托管'),
           mounted > 0
             ? h('button', {
                 type: 'button',
@@ -993,10 +1174,33 @@ window.__ModuleLoader__.load({
                 },
               }, `已挂载 ${mounted}`)
             : null),
-        h('div', { className: 'smx-code', title: skill.slug }, `/${skill.slug}`),
-        h('div', { className: 'smx-card-desc' }, skill.description || '（无描述）'),
+        h('div', { className: 'smx-code', title: skill.slug }, `/${name}`),
+        skill.nameMismatch
+          ? h('div', { className: 'smx-note-warn' }, `目录名与 name 不一致，调用请用 /${name}`)
+          : null,
+        h('div', { className: `smx-card-summary${skill.summary ? '' : ' is-empty'}`, title: skill.summary || '' }, skill.summary || '尚未生成摘要'),
+        h('div', { className: `smx-card-usage${skill.usage ? '' : ' is-empty'}`, title: skill.usage || '' },
+          h('span', { className: 'smx-usage-label' }, '用法'),
+          skill.usage || '尚未生成用法'),
+        skill.summaryStale ? h('div', { className: 'smx-card-stale' }, 'SKILL.md 已更新，建议重新生成摘要') : null,
         h('div', { className: 'smx-card-foot' },
           h('span', { className: 'smx-muted' }, `${scripts} 个脚本`),
+          h('span', { className: 'smx-spacer' }),
+          h('button', {
+            type: 'button',
+            className: 'smx-btn smx-btn-sm smx-btn-ghost',
+            title: skill.summary ? '用 AI 重新生成摘要与用法' : '用 AI 生成摘要与用法',
+            disabled: summaryBusy === true,
+            onClick: () => onSummary(skill),
+          }, summaryBusy === true ? '生成中…' : skill.summary ? '重新生成' : '生成摘要'),
+          h('label', { className: 'smx-switch', title: auto ? '关闭后模型不再自动挑选，仍可用 /name 调用' : '打开后模型会在相关任务里自动挑选' },
+            h('input', {
+              type: 'checkbox',
+              checked: auto,
+              onChange: (event) => onInvocation(skill, event.target.checked ? 'auto' : 'manual'),
+            }),
+            '自动注入')),
+        h('div', { className: 'smx-card-foot' },
           h('span', { className: 'smx-spacer' }),
           h('button', { type: 'button', className: 'smx-btn smx-btn-sm smx-btn-ghost', onClick: () => onCopy(skill) }, '复制命令'),
           h('button', { type: 'button', className: 'smx-btn smx-btn-sm', onClick: () => onDetail(skill) }, '详情'),
@@ -1122,7 +1326,7 @@ window.__ModuleLoader__.load({
                     h('div', { className: 'smx-row-main' },
                       h('div', { className: 'smx-row-title' },
                         skill.displayName,
-                        h('span', { className: 'smx-code' }, `/${skill.slug}`),
+                        h('span', { className: 'smx-code' }, skillToken(skill)),
                         data.mounted.includes(skill.slug) ? h('span', { className: 'smx-badge smx-badge-ok' }, '已挂载') : null),
                       h('div', { className: 'smx-row-desc' }, skill.description || '（无描述）')))))
               : null,
@@ -1217,7 +1421,7 @@ window.__ModuleLoader__.load({
         const chosen = (store.mySkillsPicker.skills || [])
           .filter((skill) => selected.has(skill.slug))
           .sort((left, right) => String(left.displayName).localeCompare(String(right.displayName), 'zh-Hans-CN'));
-        const tokens = chosen.map((skill) => `/${skill.slug}`).join(' ');
+        const tokens = chosen.map((skill) => skillToken(skill)).join(' ');
         const base = String(current.baseDraft || '').replace(/\s+$/, '');
         const next = tokens ? (base ? `${base} ${tokens} ` : `${tokens} `) : base;
         applyDraft(current, next);
@@ -1236,7 +1440,7 @@ window.__ModuleLoader__.load({
             h('span', { className: 'smx-spacer' }),
             h('button', { type: 'button', className: 'smx-btn smx-btn-sm smx-btn-ghost', 'aria-label': '关闭', onClick: cancel }, '✕')),
           h('div', { className: 'smx-dialog-body' },
-            h('div', { className: 'smx-sub', style: { padding: '0 0 10px' } }, '勾选的 Skill 会以 /slug 插入输入框，本轮生效；发送后由 DSH 展开为技能提示词。'),
+            h('div', { className: 'smx-sub', style: { padding: '0 0 10px' } }, '勾选的 Skill 会以 /name 插入输入框，本轮生效；发送后由 DSH 展开为技能提示词。'),
             data.status === 'loading' ? h('div', { className: 'smx-empty' }, h('span', { className: 'smx-spin' }), '正在读取本会话已挂载的 Skill…') : null,
             data.status === 'error' ? h('div', { className: 'smx-banner smx-banner-error' }, data.error || '读取失败') : null,
             ready && !skills.length
@@ -1249,7 +1453,7 @@ window.__ModuleLoader__.load({
                   skills.map((skill) => h('label', { key: skill.slug, className: 'smx-row' },
                     h('input', { type: 'checkbox', checked: data.selected.has(skill.slug), onChange: () => toggle(skill.slug) }),
                     h('div', { className: 'smx-row-main' },
-                      h('div', { className: 'smx-row-title' }, skill.displayName, h('span', { className: 'smx-code' }, `/${skill.slug}`)),
+                      h('div', { className: 'smx-row-title' }, skill.displayName, h('span', { className: 'smx-code' }, skillToken(skill))),
                       h('div', { className: 'smx-row-desc' }, skill.description || '（无描述）')))))
               : null),
           h('div', { className: 'smx-dialog-foot' },
@@ -1442,15 +1646,15 @@ window.__ModuleLoader__.load({
           return skills
             .filter((skill) => {
               if (!needle) return true;
-              const haystack = `${skill.displayName || ''} ${skill.slug || ''} ${skill.description || ''}`.toLowerCase();
+              const haystack = `${skill.displayName || ''} ${skill.name || ''} ${skill.slug || ''} ${skill.description || ''}`.toLowerCase();
               return haystack.includes(needle);
             })
             .sort((left, right) => String(left.displayName || '').localeCompare(String(right.displayName || ''), 'zh-Hans-CN'))
             .slice(0, 20)
             .map((skill) => ({
-              value: `/${skill.slug} `,
-              name: `/${skill.slug}`,
-              label: skill.displayName || skill.slug,
+              value: `${skillToken(skill)} `,
+              name: skillToken(skill),
+              label: skill.displayName || skill.name || skill.slug,
               description: skill.description || '',
               icon: SkillIcon,
               section: '自定义 SKILLS',

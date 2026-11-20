@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { readdir, readFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import { createService } from '../index.js';
 import { resolveLayout } from '../lib/paths.js';
@@ -146,7 +146,7 @@ test('archive upload stages a preview and installs it on confirm', async () => {
     assert.equal(preview.name, 'demo-skill');
     assert.deepEqual(preview.scripts.map((file) => file.path), ['scripts/run.sh']);
 
-    const confirmed = await post(service, { action: 'create-imported', stagingId: preview.stagingId });
+    const confirmed = await post(service, { action: 'create-imported', stagingId: preview.stagingId, autoSummary: false });
     assert.equal(confirmed.status, 200);
     assert.equal(confirmed.payload.skill.displayName, '文档解析');
     assert.deepEqual(confirmed.payload.skill.scripts.map((file) => file.path), ['run.sh']);
@@ -202,6 +202,7 @@ test('create writes imported scripts under scripts/ and documents the environmen
       action: 'create',
       displayName: '表格转换',
       body: '# 表格转换\n\n把 CSV 转成 Markdown。',
+      autoSummary: false,
       scripts: [
         { name: 'csv2md.py', content: '#!/usr/bin/env python3\nprint("ok")\n' },
         { name: 'csv2md.ps1', content: 'Write-Output ok\n' },
@@ -302,6 +303,207 @@ test('mount-info rejects unknown and missing slugs', async () => {
     assert.equal(unknown.status, 404);
     const missing = await post(service, { action: 'mount-info' });
     assert.equal(missing.status, 400);
+  } finally {
+    await cleanup(root);
+  }
+});
+
+test('create honours the requested invocation mode and the switch rewrites only one line', async () => {
+  const { root, service, layout } = await setup();
+  try {
+    const created = await post(service, {
+      action: 'create',
+      displayName: '自动技能',
+      body: '# 自动技能\n\n## 步骤\n1. 做点什么。',
+      invocation: 'auto',
+    });
+    assert.equal(created.status, 200);
+    const slug = created.payload.skill.slug;
+    assert.equal(created.payload.skill.modelInvocable, true);
+    assert.equal(created.payload.skill.invocation, 'auto');
+    assert.equal(created.payload.skill.name, slug);
+    assert.equal(created.payload.skill.token, `/${slug}`);
+
+    const file = `${layout.skills}/${slug}/SKILL.md`;
+    const before = await readFile(file, 'utf8');
+    assert.doesNotMatch(before, /disable-model-invocation/);
+
+    const turnedOff = await post(service, { action: 'set-invocation', slug, invocation: 'manual' });
+    assert.equal(turnedOff.status, 200);
+    assert.equal(turnedOff.payload.changed, true);
+    assert.equal(turnedOff.payload.skill.modelInvocable, false);
+    const after = await readFile(file, 'utf8');
+    const beforeLines = before.split('\n');
+    const afterLines = after.split('\n');
+    const diff = afterLines.filter((line) => !beforeLines.includes(line));
+    assert.deepEqual(diff.filter((line) => line.trim()), ['disable-model-invocation: true']);
+
+    const again = await post(service, { action: 'set-invocation', slug, invocation: 'manual' });
+    assert.equal(again.payload.changed, false);
+
+    const turnedOn = await post(service, { action: 'set-invocation', slug, invocation: 'auto' });
+    assert.equal(turnedOn.status, 200);
+    assert.equal(turnedOn.payload.changed, true);
+    assert.doesNotMatch(await readFile(file, 'utf8'), /disable-model-invocation/);
+  } finally {
+    await cleanup(root);
+  }
+});
+
+test('skills from outside the panel are listed, marked external and use their frontmatter name', async () => {
+  const { root, service, layout } = await setup();
+  try {
+    const dir = `${layout.skills}/kb-tool`;
+    await mkdir(dir, { recursive: true });
+    await writeFile(
+      `${dir}/SKILL.md`,
+      '---\nname: kb-tool\ndescription: 外部导入的知识库工具\n---\n\n# 知识库工具\n\n正文。\n',
+      'utf8',
+    );
+
+    const state = await callRoute(service, '/dsh-skill-manager/state');
+    assert.equal(state.status, 200);
+    const found = state.payload.skills.find((skill) => skill.slug === 'kb-tool');
+    assert.ok(found);
+    assert.equal(found.displayName, 'Kb Tool');
+    assert.equal(found.managed, false);
+    assert.equal(found.name, 'kb-tool');
+    assert.equal(found.token, '/kb-tool');
+    assert.equal(found.invocation, 'auto');
+
+    const toggled = await post(service, { action: 'set-invocation', slug: 'kb-tool', invocation: 'manual' });
+    assert.equal(toggled.status, 200);
+    assert.equal(toggled.payload.skill.name, 'kb-tool');
+    assert.match(await readFile(`${dir}/SKILL.md`, 'utf8'), /disable-model-invocation: true/);
+  } finally {
+    await cleanup(root);
+  }
+});
+
+test('directory name and name mismatches are reported, and directory order does not matter', async () => {
+  const { root, service, layout } = await setup();
+  try {
+    const dir = `${layout.skills}/folder-name`;
+    await mkdir(dir, { recursive: true });
+    await writeFile(`${dir}/SKILL.md`, '---\nname: other-name\ndescription: 名称不同的技能\n---\n\n# 正文\n\n内容。\n', 'utf8');
+
+    const state = await callRoute(service, '/dsh-skill-manager/state');
+    const found = state.payload.skills.find((skill) => skill.slug === 'folder-name');
+    assert.ok(found);
+    assert.equal(found.name, 'other-name');
+    assert.equal(found.token, '/other-name');
+    assert.equal(found.nameMismatch, true);
+  } finally {
+    await cleanup(root);
+  }
+});
+
+test('unloadable directories are reported as invalid instead of disappearing', async () => {
+  const { root, service, layout } = await setup();
+  try {
+    const bad = `${layout.skills}/Bad_Dir`;
+    await mkdir(bad, { recursive: true });
+    await writeFile(`${bad}/SKILL.md`, '---\nname: Bad_Dir\ndescription: 本地目录\n---\n\n# 正文\n\n内容。\n', 'utf8');
+    const emptyFile = `${layout.skills}/no-frontmatter`;
+    await mkdir(emptyFile, { recursive: true });
+    await writeFile(`${emptyFile}/SKILL.md`, '# 没有 frontmatter\n', 'utf8');
+
+    const state = await callRoute(service, '/dsh-skill-manager/state');
+    assert.equal(state.payload.skills.length, 0);
+    const bySlug = Object.fromEntries(state.payload.invalid.map((item) => [item.slug, item.message]));
+    assert.match(bySlug['Bad_Dir'] || '', /kebab-case/);
+    assert.match(bySlug['no-frontmatter'] || '', /frontmatter/);
+  } finally {
+    await cleanup(root);
+  }
+});
+
+test('AI creation also generates the card summary and usage lines', async () => {
+  const { root, service, layout } = await setup({
+    replies: [
+      '{"displayName":"要点整理"}',
+      JSON.stringify({ summary: '把长文压缩成要点清单。', usage: '用 /<name> 显式调用，或自动注入时处理长文。' }),
+    ],
+  });
+  try {
+    const created = await post(service, { action: 'create', body: '# 要点整理\n\n把长文整理成 3-6 条要点。', invocation: 'manual' });
+    assert.equal(created.status, 200);
+    const slug = created.payload.skill.slug;
+    const state = await callRoute(service, '/dsh-skill-manager/state');
+    const skill = state.payload.skills.find((item) => item.slug === slug);
+    assert.equal(skill.summary, '把长文压缩成要点清单。');
+    assert.match(skill.usage, /显式调用/);
+    assert.equal(skill.summaryStale, false);
+    assert.ok(existsSync(`${layout.manager}/summaries/${slug}.json`));
+  } finally {
+    await cleanup(root);
+  }
+});
+
+test('manual create keeps the filled summary and skips the model when asked', async () => {
+  const { root, service } = await setup({ replies: ['not json'] });
+  try {
+    const created = await post(service, {
+      action: 'create',
+      displayName: '手写技能',
+      body: '# 手写技能\n\n正文。',
+      summary: '用户自己写的摘要。',
+      usage: '用 /手写 调用。',
+      autoSummary: false,
+    });
+    assert.equal(created.status, 200);
+    assert.equal(created.payload.warnings.length, 0);
+    const state = await callRoute(service, '/dsh-skill-manager/state');
+    const skill = state.payload.skills.find((item) => item.slug === created.payload.skill.slug);
+    assert.equal(skill.summary, '用户自己写的摘要。');
+    assert.equal(skill.usage, '用 /手写 调用。');
+  } finally {
+    await cleanup(root);
+  }
+});
+
+test('generate-summary reruns the model for an existing skill and tracks staleness', async () => {
+  const { root, service, layout } = await setup({
+    replies: [
+      JSON.stringify({ summary: '第一版摘要。', usage: '用 /first 调用。' }),
+      JSON.stringify({ summary: '第二版摘要。', usage: '用 /second 调用。' }),
+    ],
+  });
+  try {
+    const created = await post(service, { action: 'create', displayName: '重新总结', body: '# 重新总结\n\n初版正文。', invocation: 'manual' });
+    const slug = created.payload.skill.slug;
+
+    const file = `${layout.skills}/${slug}/SKILL.md`;
+    const edited = `${await readFile(file, 'utf8')}\n\n补充一段新步骤。\n`;
+    await writeFile(file, edited, 'utf8');
+
+    const staleState = await callRoute(service, '/dsh-skill-manager/state');
+    assert.equal(staleState.payload.skills.find((item) => item.slug === slug).summaryStale, true);
+
+    const regenerated = await post(service, { action: 'generate-summary', slug });
+    assert.equal(regenerated.status, 200);
+    assert.equal(regenerated.payload.summary, '第二版摘要。');
+
+    const freshState = await callRoute(service, '/dsh-skill-manager/state');
+    const skill = freshState.payload.skills.find((item) => item.slug === slug);
+    assert.equal(skill.summary, '第二版摘要。');
+    assert.equal(skill.summaryStale, false);
+  } finally {
+    await cleanup(root);
+  }
+});
+
+test('deleting a skill removes its stored summary', async () => {
+  const { root, service, layout } = await setup({
+    replies: [JSON.stringify({ summary: '临时摘要。', usage: '临时用法。' })],
+  });
+  try {
+    const created = await post(service, { action: 'create', displayName: '待删除', body: '# 待删除\n\n正文。' });
+    const slug = created.payload.skill.slug;
+    assert.ok(existsSync(`${layout.manager}/summaries/${slug}.json`));
+    const removed = await post(service, { action: 'delete', slug });
+    assert.equal(removed.status, 200);
+    assert.equal(existsSync(`${layout.manager}/summaries/${slug}.json`), false);
   } finally {
     await cleanup(root);
   }

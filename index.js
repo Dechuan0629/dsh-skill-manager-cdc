@@ -17,7 +17,7 @@ import { ARCHIVE_LIMITS } from './lib/archive.js';
 import { SkillCatalog } from './lib/catalog.js';
 import { fail } from './lib/errors.js';
 import { headerValue, readJsonBody, readRawBody, requireMethod, sameOrigin, send, sendError } from './lib/http.js';
-import { describeModel, generateDraft, tryGenerateName } from './lib/llm.js';
+import { describeModel, generateDraft, tryGenerateName, tryGenerateSummary } from './lib/llm.js';
 import { describeSkillMounts } from './lib/mount-info.js';
 import { cleanDisplayName, defaultDescription, deriveSlug, humanizeSlug, normalizeManualDisplayName } from './lib/naming.js';
 import { resolveLayout, writeFileAtomic } from './lib/paths.js';
@@ -25,6 +25,7 @@ import { STAGING_TTL_MS, MAX_STAGING, StagingStore } from './lib/staging.js';
 import { MountStore } from './lib/store.js';
 import { parseSkillMarkdown } from './lib/manifest.js';
 import { normalizeScriptList, withEnvironmentNote } from './lib/scripts.js';
+import { SummaryStore, bodyDigest, normalizeSummaryRecord } from './lib/summaries.js';
 
 const SESSION_ID_RE = /^[A-Za-z0-9._:-]{1,200}$/;
 const JSON_BODY_LIMIT = 1024 * 1024;
@@ -34,6 +35,14 @@ function sessionIdOf(value) {
   if (!sessionId) fail('bad_request', '缺少会话 ID');
   if (!SESSION_ID_RE.test(sessionId)) fail('bad_request', '会话 ID 格式无效');
   return sessionId;
+}
+
+function invocationOf(payload, fallback) {
+  const raw = typeof payload?.invocation === 'string' ? payload.invocation.trim().toLowerCase() : '';
+  if (raw === 'auto' || raw === 'manual') return raw;
+  if (raw) fail('bad_request', '注入方式只能是 auto 或 manual');
+  if (typeof payload?.modelInvocable === 'boolean') return payload.modelInvocable ? 'auto' : 'manual';
+  return fallback;
 }
 
 function slugListOf(value) {
@@ -48,6 +57,7 @@ function slugListOf(value) {
  */
 export function createService(ctx, { layout = resolveLayout() } = {}) {
   const store = new MountStore(layout.stateFile);
+  const summaries = new SummaryStore(layout);
   const staging = new StagingStore(layout);
   const catalog = new SkillCatalog(layout);
   const log = (message) => {
@@ -107,7 +117,7 @@ export function createService(ctx, { layout = resolveLayout() } = {}) {
         maxStaging: MAX_STAGING,
       },
       stagingCount,
-      skills: skills.map((skill) => ({ ...skill, mountedSessions: counts[skill.slug] ?? 0 })),
+      skills: skills.map((skill) => ({ ...withSummary(skill), mountedSessions: counts[skill.slug] ?? 0 })),
       invalid,
     });
   }
@@ -153,6 +163,67 @@ export function createService(ctx, { layout = resolveLayout() } = {}) {
     }
   }
 
+  /**
+   * Persist the two card lines. `auto` is the default for AI creation and
+   * import; a manual create that left both fields empty passes auto=false.
+   */
+  async function rememberSummary(slug, { summary = '', usage = '', bodyHash = '', model = '', auto = true } = {}) {
+    const manual = normalizeSummaryRecord({ summary, usage });
+    if (manual.summary || manual.usage) {
+      return summaries.set(slug, { ...manual, bodyHash, model: model || 'manual' });
+    }
+    if (!auto) return null;
+    const skill = await catalog.read(slug).catch(() => null);
+    if (!skill) return null;
+    const generated = await tryGenerateSummary(ctx, {
+      name: skill.name,
+      description: skill.description,
+      body: skill.text,
+    });
+    if (generated.degraded) return { degraded: true, warning: generated.warning };
+    const record = await summaries.set(slug, {
+      summary: generated.summary,
+      usage: generated.usage,
+      bodyHash: skill.bodyHash,
+      model: generated.model,
+    });
+    return { ...record, degraded: false };
+  }
+
+  /** Attach the stored card copy (if any) to one skill object. */
+  function withSummary(skill) {
+    if (!skill) return skill;
+    const record = summaries.get(skill.slug);
+    return {
+      ...skill,
+      summary: record?.summary ?? '',
+      usage: record?.usage ?? '',
+      summaryUpdatedAt: record?.updatedAt ?? '',
+      summaryStale: Boolean(record?.bodyHash && record.bodyHash !== skill.bodyHash),
+    };
+  }
+
+  async function actionGenerateSummary(payload) {
+    const slug = typeof payload.slug === 'string' ? payload.slug.trim() : '';
+    if (!slug) fail('bad_request', '缺少 Skill 标识');
+    const skill = await catalog.read(slug);
+    const generated = await tryGenerateSummary(ctx, {
+      name: skill.name,
+      description: skill.description,
+      body: skill.text,
+    });
+    if (generated.degraded) {
+      return { slug, summary: '', usage: '', degraded: true, warning: generated.warning };
+    }
+    const record = await summaries.set(slug, {
+      summary: generated.summary,
+      usage: generated.usage,
+      bodyHash: skill.bodyHash,
+      model: generated.model,
+    });
+    return { slug, ...record, degraded: false };
+  }
+
   async function actionGenerate(payload) {
     const withScripts = payload.withScripts === true;
     const draft = await generateDraft(ctx, { prompt: payload.prompt, withScripts });
@@ -195,6 +266,7 @@ export function createService(ctx, { layout = resolveLayout() } = {}) {
     const whenToUse = cleanDisplayName(payload.whenToUse ?? '') || parsed.whenToUse;
     const draftBody = parsed.body.trim() ? parsed.body : bodyInput;
     const prepared = normalizeScriptList(payload.scripts);
+    const invocation = invocationOf(payload, 'manual');
     const identity = await resolveIdentity({
       requestedName: payload.displayName,
       frontmatterName: parsed.name,
@@ -209,7 +281,7 @@ export function createService(ctx, { layout = resolveLayout() } = {}) {
       description: description || defaultDescription(identity.displayName),
       whenToUse,
       body: withEnvironmentNote(draftBody, prepared.scripts),
-      modelInvocable: false,
+      modelInvocable: invocation === 'auto',
     });
     if (prepared.scripts.length > 0) {
       try {
@@ -222,6 +294,12 @@ export function createService(ctx, { layout = resolveLayout() } = {}) {
       }
     }
     const stored = prepared.scripts.length > 0 ? await catalog.read(identity.slug) : skill;
+    const summaryNotes = await rememberSummary(identity.slug, {
+      summary: payload.summary,
+      usage: payload.usage,
+      bodyHash: stored.bodyHash ?? bodyDigest(stored.text),
+      auto: payload.autoSummary !== false,
+    }).catch(() => null);
     let mounted;
     if (typeof payload.sessionId === 'string' && payload.sessionId.trim()) {
       mounted = await mountOne(sessionIdOf(payload.sessionId), stored.slug);
@@ -230,7 +308,10 @@ export function createService(ctx, { layout = resolveLayout() } = {}) {
       skill: stored,
       naming: { degraded: identity.degraded, ...(identity.warning ? { warning: identity.warning } : {}) },
       scripts: prepared.scripts.map((script) => ({ name: script.name, bytes: script.bytes })),
-      warnings: prepared.warnings,
+      warnings: [
+        ...prepared.warnings,
+        ...(summaryNotes?.warning ? [summaryNotes.warning] : []),
+      ],
       ...(mounted ? { mounted } : {}),
     };
   }
@@ -241,6 +322,7 @@ export function createService(ctx, { layout = resolveLayout() } = {}) {
     const staged = await staging.readStaged(stagingId);
     const description = cleanDisplayName(payload.description ?? '') || staged.parsed.description;
     const whenToUse = cleanDisplayName(payload.whenToUse ?? '') || staged.parsed.whenToUse;
+    const invocation = invocationOf(payload, staged.parsed.modelInvocable === false ? 'manual' : 'auto');
     const identity = await resolveIdentity({
       requestedName: payload.displayName,
       frontmatterName: staged.parsed.name,
@@ -257,9 +339,16 @@ export function createService(ctx, { layout = resolveLayout() } = {}) {
         description: description || defaultDescription(identity.displayName),
         whenToUse,
         body: staged.parsed.body,
+        modelInvocable: invocation === 'auto',
       },
     );
     await staging.discard(stagingId).catch(() => {});
+    const summaryNotes = await rememberSummary(skill.slug, {
+      summary: payload.summary,
+      usage: payload.usage,
+      bodyHash: bodyDigest(skill.text),
+      auto: payload.autoSummary !== false,
+    }).catch(() => null);
     let mounted;
     if (typeof payload.sessionId === 'string' && payload.sessionId.trim()) {
       mounted = await mountOne(sessionIdOf(payload.sessionId), skill.slug);
@@ -267,9 +356,19 @@ export function createService(ctx, { layout = resolveLayout() } = {}) {
     return {
       skill,
       naming: { degraded: identity.degraded, ...(identity.warning ? { warning: identity.warning } : {}) },
-      warnings: staged.meta.warnings ?? [],
+      warnings: [...(staged.meta.warnings ?? []), ...(summaryNotes?.warning ? [summaryNotes.warning] : [])],
       ...(mounted ? { mounted } : {}),
     };
+  }
+
+  async function actionSetInvocation(payload) {
+    const slug = typeof payload.slug === 'string' ? payload.slug.trim() : '';
+    if (!slug) fail('bad_request', '缺少 Skill 标识');
+    const invocation = invocationOf(payload, '');
+    if (!invocation) fail('bad_request', '缺少注入方式');
+    const result = await catalog.setInvocation(slug, invocation === 'auto', { log });
+    const stored = result.summary ?? (await catalog.read(slug));
+    return { skill: stored, changed: result.changed, repaired: result.repaired, ...(result.backup ? { backup: result.backup } : {}) };
   }
 
   async function actionDiscardImport(payload) {
@@ -283,6 +382,7 @@ export function createService(ctx, { layout = resolveLayout() } = {}) {
     const slug = typeof payload.slug === 'string' ? payload.slug.trim() : '';
     if (!slug) fail('bad_request', '缺少 Skill 标识');
     await catalog.delete(slug);
+    await summaries.remove(slug).catch(() => {});
     const unmountedSessions = await store.removeSkill(slug);
     return { slug, unmountedSessions };
   }
@@ -291,7 +391,7 @@ export function createService(ctx, { layout = resolveLayout() } = {}) {
     const slug = typeof payload.slug === 'string' ? payload.slug.trim() : '';
     if (!slug) fail('bad_request', '缺少 Skill 标识');
     const skill = await catalog.read(slug);
-    return { skill };
+    return { skill: withSummary(skill) };
   }
 
   /**
@@ -339,6 +439,8 @@ export function createService(ctx, { layout = resolveLayout() } = {}) {
     ['content', actionContent],
     ['mounts', actionMounts],
     ['mount-info', actionMountInfo],
+    ['set-invocation', actionSetInvocation],
+    ['generate-summary', actionGenerateSummary],
   ]);
 
   async function handleAction(request, response) {
@@ -371,7 +473,7 @@ export function createService(ctx, { layout = resolveLayout() } = {}) {
     ['/dsh-skill-manager/action', wrap(handleAction)],
   ]);
 
-  return { layout, store, staging, catalog, routes, resolveIdentity };
+  return { layout, store, staging, summaries, catalog, routes, resolveIdentity };
 }
 
 export const inject = ['webServer'];
@@ -382,6 +484,7 @@ export function apply(ctx) {
     () => {
       void service.store.load().catch((error) => ctx.logger?.warn?.(`[dsh-skill-manager] state load failed: ${error?.message ?? error}`));
       void service.staging.prune().catch((error) => ctx.logger?.warn?.(`[dsh-skill-manager] staging prune failed: ${error?.message ?? error}`));
+      void service.summaries.load().catch((error) => ctx.logger?.warn?.(`[dsh-skill-manager] summary load failed: ${error?.message ?? error}`));
     },
     'dsh-skill-manager: warm stores',
   );

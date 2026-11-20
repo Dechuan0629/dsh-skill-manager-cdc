@@ -34,32 +34,45 @@ dsh plugin --profile <profile> add git+https://github.com/Dechuan0629/dsh-skill-
 
 ```
 <DSH_HOME>/skills/
-└── pdf-digest-skill/          # 目录名必须以 -skill 结尾，ASCII kebab-case
+└── pdf-digest-skill/          # 目录名只要求 ASCII kebab-case，不再强制 -skill 结尾
     ├── SKILL.md               # 提示词正文（必须）
     └── scripts/               # 脚本目录（必须，可为空）
         └── extract.py
 ```
 
+目录名只是插件侧的文件位置标识；DSH 认的是 `SKILL.md` frontmatter 里的 `name`。面板会列出 `~/.dsh/skills/` 下所有能被 DSH 加载的技能（包括手工放进来的外部技能），只有真正无法加载的目录才会进「无效目录」提示。
+
 `SKILL.md` 使用 DSH 原生 frontmatter：
 
 ```markdown
 ---
-name: pdf-digest-skill
+name: pdf-digest
 description: 把 PDF 提取成结构化摘要
 displayName: 文档速读
 whenToUse: 用户要求阅读 PDF 或长文档时使用
 user-invocable: true
 disable-model-invocation: true
+managed-by: dsh-skill-manager
 ---
 
 这里写完整的 Skill 提示词……
 ```
 
-- `name`：ASCII kebab-case，且必须以 `-skill` 结尾；它就是 `/mySkills` 插入输入框的 `/name`。
+- `name`：ASCII kebab-case，DSH 用它作为技能标识；`/mySkills` 与 `/` 补全插入的 `/name` 就是它（目录名可以不同）。
 - `description`：给模型看的用途说明。
 - `displayName`：3–6 个汉字的显示名（面板、菜单、选择器里显示）。
-- `user-invocable: true`：允许用户用 `/name` 主动调用。
-- `disable-model-invocation: true`：不让模型在技能目录里自动挑选，只有用户显式调用或 `/mySkills` 勾选后才注入。
+- `user-invocable: true`：允许用户用 `/<name>` 主动调用。
+- `disable-model-invocation: true`：手动注入——不让模型在技能目录里自动挑选，只有用户显式调用或 `/mySkills` 勾选后才注入。去掉这一行就是自动注入。
+- `managed-by: dsh-skill-manager`：本插件创建/导入的技能会写入这个标记，面板显示「托管」；没有该标记、也没有 `displayName` 的技能显示「外部」，删除前会多做一次确认。
+
+## 注入方式（自动 / 手动）
+
+面板卡片和详情页都有「自动注入」开关，也可以按「全部 / 自动 / 手动」筛选：
+
+- **自动**：`SKILL.md` 里没有 `disable-model-invocation: true`，模型会在相关任务里自动挑选该技能（DSH 会在每轮注入技能目录，占用上下文 token）。
+- **手动**：`SKILL.md` 含 `disable-model-invocation: true`，只有 `/<name>` 显式调用或 `/mySkills` 勾选时才注入。
+
+切换时插件只改 frontmatter 的 `disable-model-invocation` 一行（其它行逐字节保留，CRLF 也不变），并顺带清理旧的 `disableModelInvocation` / `modelInvocable` 写法；写入前会把原文件备份到 `~/.dsh/skill-manager/backups/`（保留最近 20 份），写完立即重新解析自检。若该技能同时设置了 `user-invocable: false`，切到手动前会提示确认。
 
 ## 新建 Skill
 
@@ -68,6 +81,8 @@ disable-model-invocation: true
 1. **AI 生成**：输入一句话需求，调用 DSH 默认模型生成 `displayName` / `description` / `body` 草稿，可编辑后创建。
    - 勾选「同时生成配套 scripts 脚本（跨平台）」后，模型会按任务生成可直接运行的 `.py` / `.js` / `.ts` / `.sh` / `.rb` / `.ps1` / `.bat` 等脚本（**默认勾选**）。提供 `.sh` 时会同时给出 Windows 的 `.ps1` 或 `.bat`，并在正文里注明「根据 agent 环境选择 scripts/ 下对应脚本」。
 2. **手动编写**：直接填写提示词正文；可用「导入脚本」一次选择多个 `.py` / `.sh` / `.ps1` 等文件，保存时写入 `scripts/` 目录，也可逐个移除。
+
+两种方式都要选择**注入方式**（自动 / 手动，默认手动）；创建后会按选择写入或省略 `disable-model-invocation`。
 
 名称留空时，插件会调用一次 DSH 默认模型，阅读 `SKILL.md` 的定义并生成 3–6 个汉字的显示名；手动填写则直接使用（1–30 字）。模型不可用时自动降级为本地生成的名字，不会阻塞导入。
 
@@ -87,17 +102,32 @@ SKILL.md
 scripts/run.sh
 ```
 
-导入分两步：先上传到暂存区做结构与 frontmatter 校验并返回预览，确认后再写入 `~/.dsh/skills/<slug>`；暂存 30 分钟过期，最多 5 份。压缩包内可以包含其它文件（如 `README.md`、`assets/`），插件只读取并导入 `SKILL.md` 与 `scripts/`，其余文件会被忽略并在预览里给出 warning。
+导入分两步：先上传到暂存区做结构与 frontmatter 校验并返回预览（含压缩包里的注入方式，默认跟随原 `SKILL.md`），确认时再写入 `~/.dsh/skills/<slug>`；暂存 30 分钟过期，最多 5 份。压缩包内可以包含其它文件（如 `README.md`、`assets/`），插件只读取并导入 `SKILL.md` 与 `scripts/`，其余文件会被忽略并在预览里给出 warning。
+
+## 卡片摘要与用法
+
+卡片不再直接堆 SKILL.md 的描述文字，而是两段由模型写好的短文案：
+
+- **摘要**：这是什么、解决什么问题（≤ 60 字）。
+- **用法**：怎么使用、怎么生效（≤ 80 字，模型会写明 `/<name>` 显式调用或自动注入的触发时机）。
+
+生成时机：
+
+- 「一句话创建（AI）」与「导入 Skill」在确认时自动生成；失败不阻塞创建，卡片留空并给出 warning。
+- 「手写提示词」可以在表单里自己填摘要/用法；留空就保持为空，不额外调用模型。
+- 卡片和详情页都有小按钮，可随时用 AI 生成/重新生成（一次只跑一个，按钮显示「生成中…」）。
+
+存储与失效：两段文案存在 `~/.dsh/skill-manager/summaries/<目录名>.json`（含 `bodyHash`），不改写 `SKILL.md`，外部技能也安全；`SKILL.md` 内容变化后卡片会提示「已更新，建议重新生成」，但不会自动重跑。
 
 ## 会话挂载与 /mySkills
 
 - 挂载关系保存在 `~/.dsh/skill-manager/state.json`（按会话 ID 记录 slug 列表），删除 Skill 时会自动从所有会话挂载中移除。
-- `/mySkills` 在输入框输入时触发选择器，默认勾选本会话已挂载的全部自定义 Skill；确认后输入框出现 `/<slug>`，DSH 原生 skill 机制会把这些 Skill 的提示词注入本轮对话。
+- `/mySkills` 在输入框输入时触发选择器，默认勾选本会话已挂载的全部自定义 Skill；确认后输入框出现 `/<name>`，DSH 原生 skill 机制会把这些 Skill 的提示词注入本轮对话。
 - 也可以在输入框键入 `/my`，在补全菜单里选「自定义 SKILLS · /mySkills」打开同一个选择器；它注册为 client 命令（`commandUi`），所以补全行会像 `/plan` 一样显示标题与别名。命令路径与输入手势分享同一个草稿写入通道，选中后同样只改草稿、不发送。
 - 会话「⋯」→「自定义 Skills」弹窗在勾选发生变化前，「保存挂载」保持禁用，避免误点把已挂载项清空。
 - 会话「⋯」菜单 →「自定义 Skills」可随时增删挂载。
 - 面板卡片上的「已挂载 N」是一个按钮：点开按工作区分组列出挂载该 Skill 的会话（会话名来自日志标题，冷会话也会显示），可一键跳到对应会话。
-- `/` 补全里的「自定义 SKILLS」分组只负责插入 `/<slug>`；它与 DSH 自带的「技能」分组一样走 `dsh-tool-skill` 的 `/slug` 手势，不发送消息、不改写草稿里的其它内容。
+- `/` 补全里的「自定义 SKILLS」分组只负责插入 `/<name>`；它与 DSH 自带的「技能」分组一样走 `dsh-tool-skill` 的 `/slug` 手势，不发送消息、不改写草稿里的其它内容。
 
 ## HTTP 接口
 
@@ -108,10 +138,14 @@ scripts/run.sh
 | GET | `/dsh-skill-manager/state` | 技能列表、无效目录、模型状态、限制 |
 | GET | `/dsh-skill-manager/session?sessionId=` | 某会话的挂载与可用技能 |
 | POST | `/dsh-skill-manager/import` | 原始压缩包字节；`x-skill-manager-filename` 头携带文件名 |
-| POST | `/dsh-skill-manager/action` | `generate` / `generate-name` / `create` / `create-imported` / `discard-import` / `delete` / `content` / `mounts` / `mount-info` |
+| POST | `/dsh-skill-manager/action` | `generate` / `generate-name` / `create` / `create-imported` / `discard-import` / `delete` / `content` / `mounts` / `mount-info` / `set-invocation` / `generate-summary` |
+
+`set-invocation` 接收 `{ slug, invocation: "auto" | "manual" }`，返回 `{ skill, changed, repaired?, backup? }`；`changed: false` 表示本来就符合目标状态，磁盘未被写入。
+
+`generate-summary` 接收 `{ slug }`，用 DSH 默认模型重写卡片摘要与用法并落盘；失败时返回 `{ degraded: true, warning }` 而不是抛错。
 
 - `generate` 接收 `{ prompt, withScripts? }`：`withScripts: true` 时草稿额外返回 `scripts: [{ name, content, bytes }]` 与 `warnings`（例如只有 `.sh` 时的 Windows 脚本缺失提示）。
-- `create` 接收 `{ displayName?, slug?, description?, whenToUse?, body, scripts?, sessionId? }`：`scripts` 每项为 `{ name, content }`，文件名必须在 `scripts/` 下且扩展名在白名单内；创建时写入 `scripts/`，并在正文末尾补一段「脚本与环境」说明（已包含 `scripts/` 文字时不会重复追加）。
+- `create` 接收 `{ displayName?, slug?, description?, whenToUse?, body, invocation?: "auto"|"manual", summary?, usage?, autoSummary?, scripts?, sessionId? }`；不传 `invocation` 时按手动处理。`autoSummary: false` 表示不自动调用模型（手写路径默认如此）；传了 `summary`/`usage` 则直接存下：`scripts` 每项为 `{ name, content }`，文件名必须在 `scripts/` 下且扩展名在白名单内；创建时写入 `scripts/`，并在正文末尾补一段「脚本与环境」说明（已包含 `scripts/` 文字时不会重复追加）。
 
 错误统一为 `{ "ok": false, "error": { "code": "...", "message": "..." } }`，状态码见 `lib/errors.js`。
 
@@ -140,6 +174,7 @@ dsh-skill-manager/
 ├── package.json
 ├── lib/
 │   ├── archive.js           # bsdtar/unzip 解压、路径校验、limits
+│   ├── authoring.js         # writing-for-agents 指导语加载（缺文件时静默降级）
 │   ├── catalog.js           # ~/.dsh/skills 的扫描 / 读写 / 删除
 │   ├── errors.js            # SkillError + 状态码映射
 │   ├── http.js              # 同源校验、请求体读取、JSON 响应
